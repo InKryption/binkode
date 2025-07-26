@@ -1,0 +1,10 @@
+.{
+    .name = .binkode,
+    .version = "0.0.0",
+    .fingerprint = 0x1b59d267c8839f7b,
+    .paths = .{
+        "build.zig.zon",
+        "build.zig",
+        "src",
+    },
+}
