@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const varint = @import("varint.zig");
+
 pub const IntEncoding = enum {
     varint,
     fixint,
@@ -15,11 +17,11 @@ pub const DecodeError = std.Io.Reader.Error || error{DecodeFailed};
 pub fn Codec(comptime V: type) type {
     return struct {
         /// This is to be used by the codec implementation to modify behaviour, and/or report additional context.
-        ctx: CtxPtr,
+        ctx: Ctx,
         /// Serializes `value.*` to the `writer` stream.
-        encodeFn: *const fn (ctx: CtxPtr, writer: *std.Io.Writer, value: *const V) EncodeError!void,
+        encodeFn: *const fn (ctx: Ctx, writer: *std.Io.Writer, value: *const V) EncodeError!void,
         /// Deserializes into `value.*` from the `reader` stream.
-        decodeFn: *const fn (ctx: CtxPtr, reader: *std.Io.Reader, value: *V) DecodeError!void,
+        decodeFn: *const fn (ctx: Ctx, reader: *std.Io.Reader, value: *V) DecodeError!void,
         const CodecSelf = @This();
 
         pub inline fn encode(
@@ -51,7 +53,7 @@ pub fn Codec(comptime V: type) type {
 
         /// Standard codec for a byte.
         /// Never fails to encode or decode.
-        pub const byte: Codec(u8) = .implement(struct {
+        pub const byte: Codec(u8) = .implementNull(struct {
             pub fn encode(writer: *std.Io.Writer, value: *const u8) EncodeError!void {
                 try writer.writeByte(value.*);
             }
@@ -62,7 +64,7 @@ pub fn Codec(comptime V: type) type {
 
         /// Standard codec for a boolean.
         /// Failure to decode indicates a byte value other than 0 or 1.
-        pub const boolean: Codec(bool) = .implement(struct {
+        pub const boolean: Codec(bool) = .implementNull(struct {
             pub fn encode(writer: *std.Io.Writer, value: *const bool) EncodeError!void {
                 try writer.writeByte(@intFromBool(value.*));
             }
@@ -75,6 +77,59 @@ pub fn Codec(comptime V: type) type {
             }
         });
 
+        /// Standard codec for fix-encoded integer.
+        /// Failure to decode indicates overflow for the destination type.
+        pub fn fixInt(encoded_endian: std.builtin.Endian) CodecSelf {
+            const Int = if (V == usize) u64 else V;
+            return .implementEndian(encoded_endian, struct {
+                pub fn encode(endian: std.builtin.Endian, writer: *std.Io.Writer, value: *const V) EncodeError!void {
+                    try writer.writeInt(Int, value.*, endian);
+                }
+                pub fn decode(endian: std.builtin.Endian, reader: *std.Io.Reader, value: *V) DecodeError!void {
+                    const int = try reader.takeInt(Int, endian);
+                    value.* = std.math.cast(V, int) orelse return error.DecodeFailed;
+                }
+            });
+        }
+
+        /// Standard codec for variably-encoded integer.
+        /// Failure to decode indicates overflow for the destination type.
+        pub fn varInt(encoded_endian: std.builtin.Endian) CodecSelf {
+            if (@bitSizeOf(V) <= 8) @compileError("Bytes should use `.byte`");
+            return .implementEndian(encoded_endian, struct {
+                pub fn encode(endian: std.builtin.Endian, writer: *std.Io.Writer, value: *const V) EncodeError!void {
+                    var buffer: [varint.encoded_max_len]u8 = undefined;
+                    const int_kind = varint.encode(ifSignedToUnsigned(value.*), &buffer, endian);
+                    try writer.writeAll(buffer[0..int_kind.fullEncodedLen()]);
+                }
+                pub fn decode(endian: std.builtin.Endian, reader: *std.Io.Reader, value: *V) DecodeError!void {
+                    const int = std.math.cast(
+                        IfSignedAsUnsigned,
+                        try varint.decodeReader(reader, endian),
+                    ) orelse return error.DecodeFailed;
+                    value.* = ifSignedFromUnsigned(int);
+                }
+
+                const int_info = @typeInfo(V).int;
+                const IfSignedAsUnsigned = switch (int_info.signedness) {
+                    .signed => varint.Zigzagged(V),
+                    .unsigned => V,
+                };
+                fn ifSignedToUnsigned(maybe_signed: V) IfSignedAsUnsigned {
+                    return switch (int_info.signedness) {
+                        .signed => varint.zigzag(V, maybe_signed),
+                        .unsigned => maybe_signed,
+                    };
+                }
+                fn ifSignedFromUnsigned(unsigned: IfSignedAsUnsigned) V {
+                    return switch (int_info.signedness) {
+                        .signed => varint.dezigzag(V, unsigned),
+                        .unsigned => unsigned,
+                    };
+                }
+            });
+        }
+
         // -- Helpers for safely implementing codecs -- //
 
         /// Expects `methods` to be a namespace with the following methods defined:
@@ -83,13 +138,13 @@ pub fn Codec(comptime V: type) type {
         /// fn decode(reader: *std.Io.Reader, value: *V) DecodeError!void { ... }
         /// ```
         /// Returns a stateless codec with the wrapped type-erased encode/decode method callbacks.
-        pub inline fn implement(comptime methods: type) CodecSelf {
+        pub inline fn implementNull(comptime methods: type) CodecSelf {
             const erased = struct {
-                fn encodeFn(ctx: CtxPtr, writer: *std.Io.Writer, value: *const V) EncodeError!void {
+                fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, value: *const V) EncodeError!void {
                     _ = &ctx.null;
                     try methods.encode(writer, value);
                 }
-                fn decodeFn(ctx: CtxPtr, reader: *std.Io.Reader, value: *V) DecodeError!void {
+                fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, value: *V) DecodeError!void {
                     _ = &ctx.null;
                     try methods.decode(reader, value);
                 }
@@ -97,6 +152,31 @@ pub fn Codec(comptime V: type) type {
 
             return .{
                 .ctx = .none,
+                .encodeFn = erased.encodeFn,
+                .decodeFn = erased.decodeFn,
+            };
+        }
+
+        // -- Helpers for safely implementing codecs -- //
+
+        /// Expects `methods` to be a namespace with the following methods defined:
+        /// ```zig
+        /// fn encode(endian: std.builtin.Endian, writer: *std.Io.Writer, value: *const V) EncodeError!void { ... }
+        /// fn decode(endian: std.builtin.Endian, reader: *std.Io.Reader, value: *V) DecodeError!void { ... }
+        /// ```
+        /// Returns a codec defined to encode using the specified endian parameter.
+        pub inline fn implementEndian(endian: std.builtin.Endian, comptime methods: type) CodecSelf {
+            const erased = struct {
+                fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, value: *const V) EncodeError!void {
+                    try methods.encode(ctx.endian, writer, value);
+                }
+                fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, value: *V) DecodeError!void {
+                    try methods.decode(ctx.endian, reader, value);
+                }
+            };
+
+            return .{
+                .ctx = .fromEndian(endian),
                 .encodeFn = erased.encodeFn,
                 .decodeFn = erased.decodeFn,
             };
@@ -112,10 +192,10 @@ pub fn Codec(comptime V: type) type {
             const CtxImpl = @TypeOf(ctx_ptr.*);
 
             const erased = struct {
-                fn encodeFn(ctx: CtxPtr, writer: *std.Io.Writer, value: *const V) EncodeError!void {
+                fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, value: *const V) EncodeError!void {
                     try ctx.toPtr(CtxImpl).encode(writer, value);
                 }
-                fn decodeFn(ctx: CtxPtr, reader: *std.Io.Reader, value: *V) DecodeError!void {
+                fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, value: *V) DecodeError!void {
                     try ctx.toPtr(CtxImpl).decode(reader, value);
                 }
             };
@@ -129,24 +209,29 @@ pub fn Codec(comptime V: type) type {
     };
 }
 
-pub const CtxPtr = union {
+pub const Ctx = union {
     null: void,
+    endian: std.builtin.Endian,
     mut: *anyopaque,
     immut: *const anyopaque,
 
-    pub const none: CtxPtr = .{ .null = {} };
+    pub const none: Ctx = .{ .null = {} };
 
-    pub inline fn fromPtr(any_ptr: anytype) CtxPtr {
+    pub fn fromEndian(endian: std.builtin.Endian) Ctx {
+        return .{ .endian = endian };
+    }
+
+    pub inline fn fromPtr(any_ptr: anytype) Ctx {
         const P = @TypeOf(any_ptr);
         const ptr_info = switch (@typeInfo(P)) {
             .pointer => |ptr_info| ptr_info,
             else => @compileError("Expected pointer, got " ++ @typeName(P)),
         };
         const matching_tag = if (ptr_info.is_const) "immut" else "mut";
-        return @unionInit(CtxPtr, matching_tag, @ptrCast(any_ptr));
+        return @unionInit(Ctx, matching_tag, @ptrCast(any_ptr));
     }
 
-    pub inline fn toPtr(ctx_ptr: CtxPtr, comptime P: type) P {
+    pub inline fn toPtr(ctx_ptr: Ctx, comptime P: type) P {
         const ptr_info = switch (@typeInfo(P)) {
             .pointer => |ptr_info| ptr_info,
             else => @compileError("Expected pointer, got " ++ @typeName(P)),
@@ -156,163 +241,8 @@ pub const CtxPtr = union {
     }
 };
 
-pub const varint = struct {
-    pub const encoded_max_len = 1 + @sizeOf(u256);
-
-    pub fn encode(value: u256, buffer: *[encoded_max_len]u8) IntKind {
-        const kind: IntKind = .fromValue(value);
-        switch (kind) {
-            inline .u8, .u16, .u32, .u64, .u128, .u256 => |ikind| {
-                const int: ikind.Type() = @intCast(value);
-                buffer[0] = if (comptime ikind.firstByte()) |first_byte| first_byte else int;
-                if (comptime ikind.remainingLen()) |rem_len| {
-                    buffer[1..][0..rem_len].* = @bitCast(int);
-                }
-            },
-        }
-        return kind;
-    }
-
-    pub fn decodeReader(reader: *std.io.Reader) std.io.Reader.Error!u256 {
-        const first_byte = try reader.takeByte();
-        const kind: IntKind = .fromFirstByte(first_byte);
-        const rem_len = kind.remainingLen() orelse return first_byte;
-        const int_bytes = try reader.take(rem_len);
-        return kind.decode(int_bytes);
-    }
-
-    pub const IntKind = enum {
-        /// Encoded in a single byte, with a value from 0 to 250.
-        u8,
-        /// Encoded as a byte of value 251 followed by a u16.
-        u16,
-        /// Encoded as a byte of value 252 followed by a u32.
-        u32,
-        /// Encoded as a byte of value 253 followed by a u64.
-        u64,
-        /// Encoded as a byte of value 254 followed by a u128.
-        u128,
-        /// Encoded as a byte of value 255 followed by a u256.
-        ///
-        /// NOTE: at the time of writing, this is not officially recognized by the specification,
-        /// it is only mentioned as being possibly supported in the future with an extension,
-        /// under the condition that the corresponding type is added to Rust.
-        /// It is included here only for the sake of completeness and algorithmic simplicity.
-        u256,
-
-        pub fn Type(comptime kind: IntKind) type {
-            return switch (kind) {
-                .u8 => u8,
-                .u16 => u16,
-                .u32 => u32,
-                .u64 => u64,
-                .u128 => u128,
-                .u256 => u256,
-            };
-        }
-
-        pub fn fromValue(value: u256) IntKind {
-            if (value < 251) return .u8;
-            if (value < 1 << 16) return .u16;
-            if (value < 1 << 32) return .u32;
-            if (value < 1 << 64) return .u64;
-            if (value < 1 << 128) return .u128;
-            if (value < 1 << 256) return .u256;
-            comptime unreachable;
-        }
-
-        /// Returns null for `.u8`, for which the first byte simply is the value.
-        pub fn firstByte(kind: IntKind) ?u8 {
-            return switch (kind) {
-                .u8 => null,
-                .u16 => 251,
-                .u32 => 252,
-                .u64 => 253,
-                .u128 => 254,
-                .u256 => 255,
-            };
-        }
-
-        pub fn fullEncodedLen(kind: IntKind) std.math.IntFittingRange(1, encoded_max_len) {
-            return 1 + (kind.remainingLen() orelse 0);
-        }
-
-        /// If the return value is `.u8`, `byte` is the entire value.
-        pub fn fromFirstByte(first_byte: u8) IntKind {
-            return switch (first_byte) {
-                0...250 => .u8,
-                251 => .u16,
-                252 => .u32,
-                253 => .u64,
-                254 => .u128,
-                255 => .u256,
-            };
-        }
-
-        /// Returns the number of bytes following the first byte which represent the encoded integer,
-        /// or null if `kind == .u8`, meaning the first byte is the integer value.
-        pub fn remainingLen(kind: IntKind) ?std.math.IntFittingRange(0, encoded_max_len - 1) {
-            return switch (kind) {
-                .u8 => null,
-                .u16 => 2,
-                .u32 => 4,
-                .u64 => 8,
-                .u128 => 16,
-                .u256 => 32,
-            };
-        }
-
-        /// Asserts `kind.remainingLen().? == int_bytes.len`.
-        pub fn decode(kind: IntKind, int_bytes: []const u8) u256 {
-            std.debug.assert(kind.remainingLen().? == int_bytes.len);
-            return switch (kind) {
-                .u8 => unreachable,
-                inline .u16, .u32, .u64, .u128, .u256 => |ikind| {
-                    const T = ikind.Type();
-                    const len = comptime ikind.remainingLen().?;
-                    const int: T = @bitCast(int_bytes[0..len].*);
-                    return int;
-                },
-            };
-        }
-    };
-
-    /// Encodes a signed integer as an unsigned integer, such that values
-    /// which are closer to zero are mapped to a smaller unsigned integer.
-    /// This is used in the varint encoding scheme, where otherwise all
-    /// negative values would have a very large encoded representation.
-    pub fn zigzag(comptime Signed: type, signed: Signed) Zigzagged(Signed) {
-        const unsigned: Zigzagged(Signed) = @bitCast(signed);
-        if (signed == 0) return unsigned;
-        if (signed > 0) return unsigned * 2;
-        if (signed < 0) return ~unsigned * 2 + 1;
-        unreachable;
-    }
-
-    pub fn Zigzagged(comptime Signed: type) type {
-        const signed_info = @typeInfo(Signed).int;
-        if (signed_info.signedness != .signed) {
-            @compileError("Expected signed integer, got " ++ @typeName(Signed));
-        }
-        return @Type(.{ .int = .{
-            .bits = signed_info.bits,
-            .signedness = .unsigned,
-        } });
-    }
-
-    /// Inverse of `zigzag`.
-    pub fn dezigzag(comptime Signed: type, unsigned: Zigzagged(Signed)) Signed {
-        if (unsigned == 0) return 0;
-        const plus_one_bit: u1 = @intCast(unsigned & 1);
-        return switch (plus_one_bit) {
-            0 => @bitCast(@divExact(unsigned, 2)),
-            1 => @bitCast(~@divExact(unsigned - 1, 2)),
-        };
-    }
-};
-
 test "Codec(u8).byte" {
-    var test_reader_buffer: [1]u8 = undefined;
+    var test_reader_buffer: [4096]u8 = undefined;
     var test_reader_state: std.testing.Reader = .init(&test_reader_buffer, &.{.{ .buffer = "foo" }});
     const test_reader = &test_reader_state.interface;
 
@@ -325,7 +255,7 @@ test "Codec(u8).byte" {
 }
 
 test "Codec(bool).byte" {
-    var test_reader_buffer: [1]u8 = undefined;
+    var test_reader_buffer: [4096]u8 = undefined;
     var test_reader_state: std.testing.Reader = .init(&test_reader_buffer, &.{.{ .buffer = "\x00\x01\x02" }});
     const test_reader = &test_reader_state.interface;
 
@@ -335,4 +265,108 @@ test "Codec(bool).byte" {
     try std.testing.expectEqual(true, bool_codec.decodeCopy(test_reader));
     try std.testing.expectError(error.DecodeFailed, bool_codec.decodeCopy(test_reader));
     try std.testing.expectError(error.EndOfStream, bool_codec.decodeCopy(test_reader));
+}
+
+test testFixIntCodec {
+    try testFixIntCodec(.little, u64, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 });
+    try testFixIntCodec(.big, u64, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 });
+
+    try testFixIntCodec(.little, i64, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 });
+    try testFixIntCodec(.big, i64, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 });
+
+    try testFixIntCodec(.little, u16, &.{std.math.maxInt(u16)});
+    try testFixIntCodec(.big, u16, &.{std.math.maxInt(u16)});
+
+    try testFixIntCodec(.little, i16, &.{ std.math.minInt(i16), std.math.maxInt(i16) });
+    try testFixIntCodec(.big, i16, &.{ std.math.minInt(i16), std.math.maxInt(i16) });
+
+    var prng_state: std.Random.DefaultPrng = .init(16724);
+    const prng = prng_state.random();
+    try testFixIntCodec(.little, u32, &.{ prng.int(u32), prng.int(u32), prng.int(u32), prng.int(u32) });
+    try testFixIntCodec(.big, i32, &.{ prng.int(i32), prng.int(i32), prng.int(i32), prng.int(i32) });
+}
+
+fn testFixIntCodec(
+    endian: std.builtin.Endian,
+    comptime T: type,
+    ints: []const T,
+) !void {
+    const fixint_codec: Codec(T) = .fixInt(endian);
+
+    const fws_buffer = try std.testing.allocator.alloc(u8, ints.len * @sizeOf(T));
+    defer std.testing.allocator.free(fws_buffer);
+    var fixed_w: std.io.Writer = .fixed(fws_buffer);
+
+    for (ints) |int| {
+        try fixint_codec.encode(&fixed_w, &int);
+    }
+
+    var buffer: [4096]u8 = undefined;
+    var test_reader_state: std.testing.Reader = .init(&buffer, &.{
+        .{ .buffer = fixed_w.buffered() },
+    });
+    const test_reader = &test_reader_state.interface;
+
+    for (ints) |expected_int| {
+        try std.testing.expectEqual(
+            expected_int,
+            fixint_codec.decodeCopy(test_reader),
+        );
+    }
+    try std.testing.expectError(
+        error.EndOfStream,
+        fixint_codec.decodeCopy(test_reader),
+    );
+}
+
+test testVarIntCodec {
+    try testFixIntCodec(.little, u64, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 });
+    try testFixIntCodec(.big, u64, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 });
+
+    try testFixIntCodec(.little, i64, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 });
+    try testFixIntCodec(.big, i64, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 });
+
+    try testFixIntCodec(.little, u16, &.{std.math.maxInt(u16)});
+    try testFixIntCodec(.big, u16, &.{std.math.maxInt(u16)});
+
+    try testFixIntCodec(.little, i16, &.{ std.math.minInt(i16), std.math.maxInt(i16) });
+    try testFixIntCodec(.big, i16, &.{ std.math.minInt(i16), std.math.maxInt(i16) });
+
+    var prng_state: std.Random.DefaultPrng = .init(16724);
+    const prng = prng_state.random();
+    try testFixIntCodec(.little, u32, &.{ prng.int(u32), prng.int(u32), prng.int(u32), prng.int(u32) });
+    try testFixIntCodec(.big, i32, &.{ prng.int(i32), prng.int(i32), prng.int(i32), prng.int(i32) });
+}
+
+fn testVarIntCodec(
+    endian: std.builtin.Endian,
+    comptime T: type,
+    ints: []const T,
+) !void {
+    const varint_codec: Codec(T) = .varInt(endian);
+
+    const fws_buffer = try std.testing.allocator.alloc(u8, ints.len * @sizeOf(T));
+    defer std.testing.allocator.free(fws_buffer);
+    var fixed_w: std.io.Writer = .fixed(fws_buffer);
+
+    for (ints) |int| {
+        try varint_codec.encode(&fixed_w, &int);
+    }
+
+    var buffer: [4096]u8 = undefined;
+    var test_reader_state: std.testing.Reader = .init(&buffer, &.{
+        .{ .buffer = fixed_w.buffered() },
+    });
+    const test_reader = &test_reader_state.interface;
+
+    for (ints) |expected_int| {
+        try std.testing.expectEqual(
+            expected_int,
+            varint_codec.decodeCopy(test_reader),
+        );
+    }
+    try std.testing.expectError(
+        error.EndOfStream,
+        varint_codec.decodeCopy(test_reader),
+    );
 }
