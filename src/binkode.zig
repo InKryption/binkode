@@ -50,8 +50,7 @@ pub fn Codec(comptime V: type) type {
             options: Options,
             value: *const V,
         ) EncodeError!void {
-            const cm: std.builtin.CallModifier = if (isComptimeKnown(self.encodeFn)) .always_inline else .auto;
-            return @call(cm, self.encodeFn, .{ self.ctx, writer, options, value });
+            return self.encodeFn(self.ctx, writer, options, value);
         }
 
         pub inline fn decodeCopy(
@@ -70,8 +69,7 @@ pub fn Codec(comptime V: type) type {
             options: Options,
             value: *V,
         ) DecodeError!void {
-            const cm: std.builtin.CallModifier = if (isComptimeKnown(self.decodeFn)) .always_inline else .auto;
-            return @call(cm, self.decodeFn, .{ self.ctx, reader, options, value });
+            return self.decodeFn(self.ctx, reader, options, value);
         }
 
         // -- Standard Codecs -- //
@@ -189,10 +187,6 @@ pub fn Codec(comptime V: type) type {
     };
 }
 
-inline fn isComptimeKnown(value: anytype) bool {
-    return @typeInfo(@TypeOf(.{value})).@"struct".fields[0].is_comptime;
-}
-
 pub const Ctx = union {
     null: void,
     mut: ?*anyopaque,
@@ -216,7 +210,7 @@ pub const Ctx = union {
             else => @compileError("Expected pointer, got " ++ @typeName(P)),
         };
         const raw_ptr = @field(ctx_ptr, if (ptr_info.is_const) "immut" else "mut");
-        return @alignCast(@ptrCast(raw_ptr));
+        return @ptrCast(@alignCast(raw_ptr));
     }
 };
 
