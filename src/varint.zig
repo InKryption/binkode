@@ -1,8 +1,10 @@
 const std = @import("std");
 
-pub const encoded_max_len = 1 + @sizeOf(u256);
-
-pub fn encode(value: u256, buffer: *[encoded_max_len]u8, endian: std.builtin.Endian) IntKind {
+pub fn encode(
+    value: u256,
+    buffer: *[IntKind.fullEncodedLen(.maximum)]u8,
+    endian: std.builtin.Endian,
+) IntKind {
     const kind: IntKind = .fromValue(value);
     switch (kind) {
         inline .u8, .u16, .u32, .u64, .u128, .u256 => |ikind| {
@@ -16,11 +18,22 @@ pub fn encode(value: u256, buffer: *[encoded_max_len]u8, endian: std.builtin.End
     return kind;
 }
 
-pub fn decodeReader(reader: *std.io.Reader, endian: std.builtin.Endian) std.io.Reader.Error!u256 {
-    const first_byte = try reader.takeByte();
+pub fn decodeReader(
+    reader: *std.Io.Reader,
+    endian: std.builtin.Endian,
+) std.Io.Reader.Error!u256 {
+    const first_byte = first_byte: {
+        var first_byte: u8 = undefined;
+        try reader.readSliceAll((&first_byte)[0..1]);
+        break :first_byte first_byte;
+    };
     const kind: IntKind = .fromFirstByte(first_byte);
     const rem_len = kind.remainingLen() orelse return first_byte;
-    const int_bytes = try reader.take(rem_len);
+
+    var int_bytes_buffer: [IntKind.fullEncodedLen(.maximum)]u8 = undefined;
+    const int_bytes = int_bytes_buffer[0..rem_len];
+    try reader.readSliceAll(int_bytes);
+
     return kind.decode(int_bytes, endian);
 }
 
@@ -42,6 +55,9 @@ pub const IntKind = enum {
     /// under the condition that the corresponding type is added to Rust.
     /// It is included here only for the sake of completeness and algorithmic simplicity.
     u256,
+
+    /// The maximum possible encoded representation.
+    pub const maximum: IntKind = .u256;
 
     pub fn Type(comptime kind: IntKind) type {
         return switch (kind) {
@@ -76,7 +92,9 @@ pub const IntKind = enum {
         };
     }
 
-    pub fn fullEncodedLen(kind: IntKind) std.math.IntFittingRange(1, encoded_max_len) {
+    pub const FullEncodedLen = std.math.IntFittingRange(1, 1 + remainingLen(.maximum) orelse 0);
+
+    pub fn fullEncodedLen(kind: IntKind) std.math.IntFittingRange(1, 1 + (remainingLen(.maximum) orelse 0)) {
         return 1 + (kind.remainingLen() orelse 0);
     }
 
@@ -92,9 +110,11 @@ pub const IntKind = enum {
         };
     }
 
+    pub const RemainingLen = std.math.IntFittingRange(0, 32);
+
     /// Returns the number of bytes following the first byte which represent the encoded integer,
     /// or null if `kind == .u8`, meaning the first byte is the integer value.
-    pub fn remainingLen(kind: IntKind) ?std.math.IntFittingRange(0, encoded_max_len - 1) {
+    pub fn remainingLen(kind: IntKind) ?RemainingLen {
         return switch (kind) {
             .u8 => null,
             .u16 => 2,
@@ -120,35 +140,41 @@ pub const IntKind = enum {
     }
 };
 
-/// Encodes a signed integer as an unsigned integer, such that values
-/// which are closer to zero are mapped to a smaller unsigned integer.
-/// This is used in the varint encoding scheme, where otherwise all
-/// negative values would have a very large encoded representation.
-pub fn zigzag(comptime Signed: type, signed: Signed) Zigzagged(Signed) {
-    const unsigned: Zigzagged(Signed) = @bitCast(signed);
-    if (signed == 0) return unsigned;
-    if (signed > 0) return unsigned * 2;
-    if (signed < 0) return ~unsigned * 2 + 1;
-    unreachable;
-}
-
-pub fn Zigzagged(comptime Signed: type) type {
-    const signed_info = @typeInfo(Signed).int;
-    if (signed_info.signedness != .signed) {
-        @compileError("Expected signed integer, got " ++ @typeName(Signed));
+pub const zigzag = struct {
+    pub fn SignedAsUnsigned(comptime Signed: type) type {
+        const signed_info = @typeInfo(Signed).int;
+        switch (signed_info.signedness) {
+            .signed => {},
+            .unsigned => @compileError("Expected signed integer, got " ++ @typeName(Signed)),
+        }
+        return @Type(.{ .int = .{
+            .bits = signed_info.bits,
+            .signedness = .unsigned,
+        } });
     }
-    return @Type(.{ .int = .{
-        .bits = signed_info.bits,
-        .signedness = .unsigned,
-    } });
-}
 
-/// Inverse of `zigzag`.
-pub fn dezigzag(comptime Signed: type, unsigned: Zigzagged(Signed)) Signed {
-    if (unsigned == 0) return 0;
-    const plus_one_bit: u1 = @intCast(unsigned & 1);
-    return switch (plus_one_bit) {
-        0 => @bitCast(@divExact(unsigned, 2)),
-        1 => @bitCast(~@divExact(unsigned - 1, 2)),
-    };
-}
+    /// Encodes a signed integer as an unsigned integer, such that values
+    /// which are closer to zero are mapped to a smaller unsigned integer.
+    /// This is used in the varint encoding scheme, where otherwise all
+    /// negative values would have a very large encoded representation.
+    /// NOTE: for unsigned integers, simply returns `signed`, which is
+    /// actually unsigned despite its namesake in that circumstance.
+    pub fn signedToUnsigned(comptime Signed: type, signed: Signed) SignedAsUnsigned(Signed) {
+        const Unsigned = SignedAsUnsigned(Signed);
+        const unsigned: Unsigned = @bitCast(signed);
+        if (signed == 0) return unsigned;
+        if (signed > 0) return unsigned * 2;
+        if (signed < 0) return ~unsigned * 2 + 1;
+        unreachable;
+    }
+
+    /// Inverse of `signedToUnsigned`.
+    pub fn signedFromUnsigned(comptime Signed: type, unsigned: SignedAsUnsigned(Signed)) Signed {
+        if (unsigned == 0) return 0;
+        const plus_one_bit: u1 = @intCast(unsigned & 1);
+        return switch (plus_one_bit) {
+            0 => @bitCast(@divExact(unsigned, 2)),
+            1 => @bitCast(~@divExact(unsigned - 1, 2)),
+        };
+    }
+};
