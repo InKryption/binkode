@@ -73,6 +73,61 @@ pub fn Codec(comptime V: type) type {
             return self.decodeFn(self.ctx, reader, options, value);
         }
 
+        pub const Ctx = union {
+            null: void,
+            mut: ?*anyopaque,
+            immut: ?*const anyopaque,
+            fields: if (Fields == noreturn) noreturn else *const Fields,
+
+            pub const none: Ctx = .{ .null = {} };
+
+            pub inline fn fromPtr(any_ptr: anytype) Ctx {
+                const P = @TypeOf(any_ptr);
+                const ptr_info = switch (@typeInfo(P)) {
+                    .pointer => |ptr_info| ptr_info,
+                    else => @compileError("Expected pointer, got " ++ @typeName(P)),
+                };
+                const matching_tag = if (ptr_info.is_const) "immut" else "mut";
+                return @unionInit(Ctx, matching_tag, @ptrCast(any_ptr));
+            }
+
+            pub inline fn toPtr(ctx_ptr: Ctx, comptime P: type) P {
+                const ptr_info = switch (@typeInfo(P)) {
+                    .pointer => |ptr_info| ptr_info,
+                    else => @compileError("Expected pointer, got " ++ @typeName(P)),
+                };
+                const raw_ptr = @field(ctx_ptr, if (ptr_info.is_const) "immut" else "mut");
+                return @ptrCast(@alignCast(raw_ptr));
+            }
+
+            pub const Fields: type = switch (@typeInfo(V)) {
+                inline //
+                .@"struct",
+                .@"union",
+                => |info, tag| @Type(.{ .@"struct" = .{
+                    .layout = .auto,
+                    .backing_integer = null,
+                    .is_tuple = tag == .@"struct" and info.is_tuple,
+                    .decls = &.{},
+                    .fields = fields: {
+                        var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
+                        for (&fields, info.fields) |*ctx_field, v_field| {
+                            const FieldCodec = Codec(v_field.type);
+                            ctx_field.* = .{
+                                .name = v_field.name,
+                                .type = FieldCodec,
+                                .default_value_ptr = null,
+                                .is_comptime = false,
+                                .alignment = @alignOf(FieldCodec),
+                            };
+                        }
+                        break :fields &fields;
+                    },
+                } }),
+                else => noreturn,
+            };
+        };
+
         // -- Standard Codecs -- //
 
         /// Standard codec for a byte.
@@ -176,7 +231,42 @@ pub fn Codec(comptime V: type) type {
             }
         });
 
+        pub inline fn stdStruct(field_contexts: *const Ctx.Fields) CodecSelf {
+            return .implementFields(field_contexts, struct {
+                pub fn encode(fields: Ctx.Fields, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                    inline for (@typeInfo(V).@"struct".fields) |s_field| {
+                        const field_ctx: Codec(s_field.type) = @field(fields, s_field.name);
+                        try field_ctx.encode(writer, options, &@field(value, s_field.name));
+                    }
+                }
+
+                pub fn decode(fields: Ctx.Fields, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                    inline for (@typeInfo(V).@"struct".fields) |s_field| {
+                        const field_ctx: Codec(s_field.type) = @field(fields, s_field.name);
+                        try field_ctx.decodeInto(reader, options, &@field(value, s_field.name));
+                    }
+                }
+            });
+        }
+
         // -- Helpers for safely implementing codecs -- //
+
+        pub inline fn implementFields(fields: *const Ctx.Fields, comptime methods: type) CodecSelf {
+            const erased = struct {
+                fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                    try methods.encode(ctx.fields.*, writer, options, value);
+                }
+                fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                    try methods.decode(ctx.fields.*, reader, options, value);
+                }
+            };
+
+            return .{
+                .ctx = .{ .fields = fields },
+                .encodeFn = erased.encodeFn,
+                .decodeFn = erased.decodeFn,
+            };
+        }
 
         /// Expects `methods` to be a namespace with the following methods defined:
         /// ```zig
@@ -204,33 +294,6 @@ pub fn Codec(comptime V: type) type {
         }
     };
 }
-
-pub const Ctx = union {
-    null: void,
-    mut: ?*anyopaque,
-    immut: ?*const anyopaque,
-
-    pub const none: Ctx = .{ .null = {} };
-
-    pub inline fn fromPtr(any_ptr: anytype) Ctx {
-        const P = @TypeOf(any_ptr);
-        const ptr_info = switch (@typeInfo(P)) {
-            .pointer => |ptr_info| ptr_info,
-            else => @compileError("Expected pointer, got " ++ @typeName(P)),
-        };
-        const matching_tag = if (ptr_info.is_const) "immut" else "mut";
-        return @unionInit(Ctx, matching_tag, @ptrCast(any_ptr));
-    }
-
-    pub inline fn toPtr(ctx_ptr: Ctx, comptime P: type) P {
-        const ptr_info = switch (@typeInfo(P)) {
-            .pointer => |ptr_info| ptr_info,
-            else => @compileError("Expected pointer, got " ++ @typeName(P)),
-        };
-        const raw_ptr = @field(ctx_ptr, if (ptr_info.is_const) "immut" else "mut");
-        return @ptrCast(@alignCast(raw_ptr));
-    }
-};
 
 test "Codec(u8).byte" {
     var test_reader_buffer: [4096]u8 = undefined;
@@ -262,29 +325,88 @@ test "Codec(bool).bool" {
     try std.testing.expectError(error.EndOfStream, bool_codec.decodeCopy(test_reader, .default));
 }
 
-test testStdIntCodec {
-    try testStdIntCodec(i16, &.{ 1, 5, 10000, 32, 8 });
-    try testStdIntCodec(u16, &.{ 1, 5, 10000, 32, 8 });
-    try testStdIntCodec(i32, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(u32, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(i64, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(u64, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(i128, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(u128, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(i256, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(u256, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(isize, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdIntCodec(usize, &.{ 1, 5, 1000000000, 32, 8 });
+test "std_int" {
+    try testCodecRoundTrips(i16, .std_int, &intTestEdgeCases(i16) ++ .{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(u16, .std_int, &intTestEdgeCases(u16) ++ .{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(i32, .std_int, &intTestEdgeCases(i32) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u32, .std_int, &intTestEdgeCases(u32) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i64, .std_int, &intTestEdgeCases(i64) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u64, .std_int, &intTestEdgeCases(u64) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i128, .std_int, &intTestEdgeCases(i128) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u128, .std_int, &intTestEdgeCases(u128) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i256, .std_int, &intTestEdgeCases(i256) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u256, .std_int, &intTestEdgeCases(u256) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(isize, .std_int, &intTestEdgeCases(isize) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(usize, .std_int, &intTestEdgeCases(usize) ++ .{ 1, 5, 1000000000, 32, 8 });
 }
 
-fn testStdIntCodec(
-    comptime T: type,
-    ints: []const T,
-) !void {
+test "std_float" {
+    try testCodecRoundTrips(f32, .std_float, &.{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(f32, .std_float, &.{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(f64, .std_float, &.{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(f64, .std_float, &.{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(f32, .std_float, &floatTestEdgeCases(f32));
+    try testCodecRoundTrips(f64, .std_float, &floatTestEdgeCases(f64));
+}
+
+test "stdStruct" {
+    const S = struct {
+        a: u32,
+        b: f64,
+    };
+    const struct_codec: Codec(S) = .stdStruct(&.{
+        .a = .std_int,
+        .b = .std_float,
+    });
+
+    {
+        var aw_state: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer aw_state.deinit();
+        const aw = &aw_state.writer;
+
+        const value: S = .{ .a = 1, .b = 2.0 };
+        try struct_codec.encode(aw, .default, &value);
+        var reader: std.Io.Reader = .fixed(aw.buffered());
+        try std.testing.expectEqual(value, struct_codec.decodeCopy(&reader, .default));
+    }
+
+    const struct_test_edge_cases = comptime blk: {
+        const ints = intTestEdgeCases(u32);
+        const floats = floatTestEdgeCases(f64);
+        var struct_test_edge_cases: [ints.len * floats.len]S = undefined;
+
+        for (ints, 0..) |int, i| for (floats, 0..) |float, j| {
+            struct_test_edge_cases[i + j * ints.len] = .{ .a = int, .b = float };
+        };
+
+        break :blk struct_test_edge_cases;
+    };
+    try testCodecRoundTrips(S, struct_codec, &struct_test_edge_cases);
+}
+
+fn floatTestEdgeCases(comptime F: type) [18]F {
+    const inf = std.math.inf(F);
+    const max = std.math.floatMax(F);
+    const eps = std.math.floatEps(F);
+    const min = std.math.floatMin(F);
+    const min_true = std.math.floatTrueMin(F);
+    return .{
+        0.0,      -0.0,
+        min_true, -min_true,
+        min,      -min,
+        0.1,      -0.1,
+        0.2,      -0.2,
+        0.3,      -0.3,
+        eps,      -eps,
+        max,      -max,
+        inf,      -inf,
+    };
+}
+
+fn intTestEdgeCases(comptime T: type) [23]T {
     const min_int = std.math.minInt(T);
     const max_int = std.math.maxInt(T);
-    try testCodecRoundTrips(T, .std_int, ints);
-    try testCodecRoundTrips(T, .std_int, &.{
+    return .{
         // edge cases
         min_int,
 
@@ -319,38 +441,7 @@ fn testStdIntCodec(
         @min((1 << 256) + 1, max_int),
 
         max_int,
-    });
-}
-
-test testStdFloatCodec {
-    try testStdFloatCodec(f32, &.{ 1, 5, 10000, 32, 8 });
-    try testStdFloatCodec(f32, &.{ 1, 5, 1000000000, 32, 8 });
-    try testStdFloatCodec(f64, &.{ 1, 5, 10000, 32, 8 });
-    try testStdFloatCodec(f64, &.{ 1, 5, 1000000000, 32, 8 });
-}
-
-fn testStdFloatCodec(
-    comptime T: type,
-    floats: []const T,
-) !void {
-    const inf = std.math.inf(T);
-    const max = std.math.floatMax(T);
-    const eps = std.math.floatEps(T);
-    const min = std.math.floatMin(T);
-    const min_true = std.math.floatTrueMin(T);
-
-    try testCodecRoundTrips(T, .std_float, floats);
-    try testCodecRoundTrips(T, .std_float, &.{
-        0.0,      -0.0,
-        min_true, -min_true,
-        min,      -min,
-        0.1,      -0.1,
-        0.2,      -0.2,
-        0.3,      -0.3,
-        eps,      -eps,
-        max,      -max,
-        inf,      -inf,
-    });
+    };
 }
 
 fn testCodecRoundTrips(
