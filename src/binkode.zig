@@ -77,7 +77,7 @@ pub fn Codec(comptime V: type) type {
             null: void,
             mut: ?*anyopaque,
             immut: ?*const anyopaque,
-            payload: if (Payload == noreturn) noreturn else *const Payload,
+            child: if (Child == noreturn) noreturn else *const Codec(Child),
             fields: if (Fields == noreturn) noreturn else *const Fields,
 
             pub const none: Ctx = .{ .null = {} };
@@ -101,8 +101,10 @@ pub fn Codec(comptime V: type) type {
                 return @ptrCast(@alignCast(raw_ptr));
             }
 
-            pub const Payload = switch (@typeInfo(V)) {
-                .optional => |optional_info| Codec(optional_info.child),
+            pub const Child = switch (@typeInfo(V)) {
+                .optional => |optional_info| optional_info.child,
+                .array => |array_info| array_info.child,
+                .vector => |vec_info| vec_info.child,
                 else => noreturn,
             };
 
@@ -274,17 +276,27 @@ pub fn Codec(comptime V: type) type {
 
         /// Standard codec for an optional.
         /// Failure to decode indicates either a failure to decode the boolean, or the potential payload.
-        pub inline fn stdOptional(payload_codec: *const Ctx.Payload) CodecSelf {
-            return .implementPayload(payload_codec, struct {
+        pub inline fn stdOptional(payload_codec: *const Codec(Ctx.Child)) CodecSelf {
+            return .implementChild(payload_codec, struct {
                 const Unwrapped = @typeInfo(V).optional.child;
 
-                pub fn encode(pl_codec: Ctx.Payload, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                pub fn encode(
+                    pl_codec: Codec(Ctx.Child),
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
                     try std_bool.encode(writer, options, &(value.* != null));
                     const payload = if (value.*) |*unwrapped| unwrapped else return;
                     try pl_codec.encode(writer, options, payload);
                 }
 
-                pub fn decode(pl_codec: Ctx.Payload, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                pub fn decode(
+                    pl_codec: Codec(Ctx.Child),
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    value: *V,
+                ) DecodeError!void {
                     const is_some = try std_bool.decodeCopy(reader, options);
                     value.* = if (is_some) @as(Unwrapped, undefined) else null;
                     if (is_some) try pl_codec.decodeInto(reader, options, &value.*.?);
@@ -406,25 +418,58 @@ pub fn Codec(comptime V: type) type {
             }
         });
 
+        /// Standard codec for an array. Writes no length.
+        pub inline fn stdArray(element_codec: *const Codec(Ctx.Child)) CodecSelf {
+            return .implementChild(element_codec, struct {
+                const not_implemented_err_msg = "array codec not is not implemented for type " ++ @typeName(V);
+
+                pub fn encode(
+                    elem_codec: Codec(Ctx.Child),
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
+                    switch (@typeInfo(V)) {
+                        .array => for (value) |*elem| try elem_codec.encode(writer, options, elem),
+                        .vector => |vec_info| for (0..vec_info.len) |i| try elem_codec.encode(writer, options, &value[i]),
+                        else => @compileError(not_implemented_err_msg),
+                    }
+                }
+
+                pub fn decode(
+                    elem_codec: Codec(Ctx.Child),
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    value: *V,
+                ) DecodeError!void {
+                    switch (@typeInfo(V)) {
+                        .array => for (value) |*elem| try elem_codec.decodeInto(reader, options, elem),
+                        .vector => |vec_info| for (0..vec_info.len) |i| try elem_codec.decodeInto(reader, options, &value[i]),
+                        else => @compileError(not_implemented_err_msg),
+                    }
+                }
+            });
+        }
+
         // -- Helpers for safely implementing codecs -- //
 
         /// Expects `methods` to be a namespace with the following methods defined:
         /// ```zig
-        /// fn encode(payload_codec: Codec(Payload), writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void { ... }
-        /// fn decode(payload_codec: Codec(Payload), reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void { ... }
+        /// fn encode(child_codec: Codec(Ctx.Child), writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void { ... }
+        /// fn decode(child_codec: Codec(Ctx.Child), reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void { ... }
         /// ```
-        pub inline fn implementPayload(payload: *const Ctx.Payload, comptime methods: type) CodecSelf {
+        pub inline fn implementChild(child: *const Codec(Ctx.Child), comptime methods: type) CodecSelf {
             const erased = struct {
                 fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
-                    try methods.encode(ctx.payload.*, writer, options, value);
+                    try methods.encode(ctx.child.*, writer, options, value);
                 }
                 fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
-                    try methods.decode(ctx.payload.*, reader, options, value);
+                    try methods.decode(ctx.child.*, reader, options, value);
                 }
             };
 
             return .{
-                .ctx = .{ .payload = payload },
+                .ctx = .{ .child = child },
                 .encodeFn = erased.encodeFn,
                 .decodeFn = erased.decodeFn,
             };
@@ -619,6 +664,23 @@ test "stdUnion" {
         .{ .int = 1111111111 },
         .{ .float = -7 },
         .{ .record = .{ .a = 1, .b = 2, .c = .foo } },
+    });
+}
+
+test "stdArray" {
+    try testCodecRoundTrips([2]u64, .stdArray(&.std_int), @ptrCast(&intTestEdgeCases(u64) ++ intTestEdgeCases(u64)));
+    try testCodecRoundTrips([2]u64, .stdArray(&.std_int), &.{
+        .{ 1, 2 },
+        .{ 61, 313131 },
+        @splat(111111111),
+    });
+
+    try testCodecRoundTrips([2]f32, .stdArray(&.std_float), @ptrCast(&floatTestEdgeCases(f32) ++ floatTestEdgeCases(f32)));
+    try testCodecRoundTrips([2]f64, .stdArray(&.std_float), @ptrCast(&floatTestEdgeCases(f64) ++ floatTestEdgeCases(f64)));
+    try testCodecRoundTrips(@Vector(2, f32), .stdArray(&.std_float), &.{
+        .{ -1.0, 2 },
+        .{ 61, -313131 },
+        @splat(111111111.0),
     });
 }
 
