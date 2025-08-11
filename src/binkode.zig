@@ -130,6 +130,28 @@ pub fn Codec(comptime V: type) type {
 
         // -- Standard Codecs -- //
 
+        /// Standard codec for a zero-sized value.
+        pub const std_void: CodecSelf = .implementNull(struct {
+            comptime {
+                if (@sizeOf(V) != 0) @compileError(
+                    "void codec is not implemented for type " ++ @typeName(V) ++
+                        " of size " ++ std.fmt.comptimePrint("{d}", .{@sizeOf(V)}),
+                );
+            }
+
+            pub fn encode(writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                _ = writer;
+                _ = options;
+                _ = value;
+            }
+
+            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                _ = reader;
+                _ = options;
+                _ = value;
+            }
+        });
+
         /// Standard codec for a byte.
         /// Never fails to encode or decode.
         pub const std_byte: Codec(u8) = .implementNull(struct {
@@ -170,6 +192,7 @@ pub fn Codec(comptime V: type) type {
             }
         });
 
+        /// Standard codec for a float.
         pub const std_float: CodecSelf = .implementNull(struct {
             const AsInt = std.meta.Int(.unsigned, @bitSizeOf(V));
 
@@ -191,6 +214,9 @@ pub fn Codec(comptime V: type) type {
             }
         });
 
+        /// Standard codec for a UTF-8 codepoint.
+        /// Failure to encode indicates an invalid codepoint value.
+        /// Failure to decode indicates an invalid codepoint value.
         pub const std_utf8_codepoint: CodecSelf = .implementNull(struct {
             comptime {
                 switch (V) {
@@ -233,14 +259,24 @@ pub fn Codec(comptime V: type) type {
 
         pub inline fn stdStruct(field_contexts: *const Ctx.Fields) CodecSelf {
             return .implementFields(field_contexts, struct {
-                pub fn encode(fields: Ctx.Fields, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                pub fn encode(
+                    fields: Ctx.Fields,
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
                     inline for (@typeInfo(V).@"struct".fields) |s_field| {
                         const field_ctx: Codec(s_field.type) = @field(fields, s_field.name);
                         try field_ctx.encode(writer, options, &@field(value, s_field.name));
                     }
                 }
 
-                pub fn decode(fields: Ctx.Fields, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                pub fn decode(
+                    fields: Ctx.Fields,
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    value: *V,
+                ) DecodeError!void {
                     inline for (@typeInfo(V).@"struct".fields) |s_field| {
                         const field_ctx: Codec(s_field.type) = @field(fields, s_field.name);
                         try field_ctx.decodeInto(reader, options, &@field(value, s_field.name));
@@ -248,6 +284,90 @@ pub fn Codec(comptime V: type) type {
                 }
             });
         }
+
+        /// AKA "enums" in the bincode specification, written in the context of rust.
+        pub inline fn stdUnion(field_contexts: *const Ctx.Fields) CodecSelf {
+            return .implementFields(field_contexts, struct {
+                const union_info = @typeInfo(V).@"union";
+                const tag_codec: Codec(union_info.tag_type.?) = .std_discriminant;
+
+                pub fn encode(
+                    fields: Ctx.Fields,
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
+                    const tag: union_info.tag_type.? = value.*;
+                    try tag_codec.encode(writer, options, &tag);
+                    switch (value.*) {
+                        inline else => |*payload, itag| {
+                            const Payload = @TypeOf(payload.*);
+                            const field_ctx: Codec(Payload) = @field(fields, @tagName(itag));
+                            try field_ctx.encode(writer, options, payload);
+                        },
+                    }
+                }
+
+                pub fn decode(
+                    fields: Ctx.Fields,
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    value: *V,
+                ) DecodeError!void {
+                    switch (try tag_codec.decodeCopy(reader, options)) {
+                        inline else => |itag| {
+                            value.* = @unionInit(V, @tagName(itag), undefined);
+                            const Payload = @FieldType(V, @tagName(itag));
+                            const payload_ctx: Codec(Payload) = @field(fields, @tagName(itag));
+                            try payload_ctx.decodeInto(reader, options, &@field(value, @tagName(itag)));
+                        },
+                    }
+                }
+            });
+        }
+
+        /// Standard codec for an enum used as a discriminant, aka the tag of a tagged union, aka the tag of a rust enum.
+        /// Failure to decode indicates the value overflowed or didn't match a valid value.
+        pub const std_discriminant: CodecSelf = .implementNull(struct {
+            const enum_info = @typeInfo(V).@"enum";
+            const tag_info = @typeInfo(enum_info.tag_type).int;
+            comptime {
+                const err_msg_preamble = "discriminant codec is not implemented for enum " ++ @typeName(V);
+                const err_msg_preamble_bad_int = " with tag type " ++ @typeName(enum_info.tag_type);
+                if (tag_info.signedness != .unsigned) @compileError(
+                    err_msg_preamble ++ err_msg_preamble_bad_int ++ ", which isn't unsigned.",
+                );
+                if (tag_info.bits > 32) @compileError(
+                    err_msg_preamble ++ err_msg_preamble_bad_int ++ ", which has more than 32 bits.",
+                );
+                if (!enum_info.is_exhaustive) @compileError(
+                    err_msg_preamble ++ ", which is non-exhaustive.",
+                );
+            }
+
+            pub fn encode(writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                const as_u32: u32 = @intFromEnum(value.*);
+                return Codec(u32).std_int.encode(writer, options, &as_u32);
+            }
+
+            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                const as_u32 = try Codec(u32).std_int.decodeCopy(reader, options);
+                if (as_u32 > std.math.maxInt(enum_info.tag_type)) return error.DecodeFailed;
+                const raw: enum_info.tag_type = @intCast(as_u32);
+                // TODO: if/when https://github.com/ziglang/zig/issues/12250 is implemented, replace this `enums.fromInt` with an
+                // implementation that leverages where we create an enum with all the same type info as `V`, but with `.is_exhaustive = false`,
+                // such that we could cast `raw` to that non-exhaustive equivalent, and switch on that value like so:
+                // ```
+                // const NonExhaustive = ;
+                // const non_exhaustive: NonExhaustive = @enumFromInt(raw);
+                // return switch (non_exhaustive) {
+                //     _ => return error.DecodeFailed,
+                //     else => |tag| @enumFromInt(@intFromEnum(tag)),
+                // };
+                // ```
+                value.* = std.enums.fromInt(V, raw) orelse return error.DecodeFailed;
+            }
+        });
 
         // -- Helpers for safely implementing codecs -- //
 
@@ -295,7 +415,15 @@ pub fn Codec(comptime V: type) type {
     };
 }
 
-test "Codec(u8).byte" {
+test "std_void" {
+    var null_reader: std.Io.Reader = .failing;
+    var null_writer: std.Io.Writer.Discarding = .init(&.{});
+    const void_codec: Codec(void) = .std_void;
+    try std.testing.expectEqual({}, void_codec.encode(&null_writer.writer, .default, &{}));
+    try std.testing.expectEqual({}, void_codec.decodeCopy(&null_reader, .default));
+}
+
+test "std_byte" {
     var test_reader_buffer: [4096]u8 = undefined;
     var test_reader_state: std.testing.Reader = .init(&test_reader_buffer, &.{
         .{ .buffer = "foo" },
@@ -310,7 +438,7 @@ test "Codec(u8).byte" {
     try std.testing.expectError(error.EndOfStream, byte_codec.decodeCopy(test_reader, .default));
 }
 
-test "Codec(bool).bool" {
+test "std_bool" {
     var test_reader_buffer: [4096]u8 = undefined;
     var test_reader_state: std.testing.Reader = .init(&test_reader_buffer, &.{
         .{ .buffer = "\x00\x01\x02" },
@@ -359,17 +487,6 @@ test "stdStruct" {
         .b = .std_float,
     });
 
-    {
-        var aw_state: std.Io.Writer.Allocating = .init(std.testing.allocator);
-        defer aw_state.deinit();
-        const aw = &aw_state.writer;
-
-        const value: S = .{ .a = 1, .b = 2.0 };
-        try struct_codec.encode(aw, .default, &value);
-        var reader: std.Io.Reader = .fixed(aw.buffered());
-        try std.testing.expectEqual(value, struct_codec.decodeCopy(&reader, .default));
-    }
-
     const struct_test_edge_cases = comptime blk: {
         const ints = intTestEdgeCases(u32);
         const floats = floatTestEdgeCases(f64);
@@ -382,6 +499,39 @@ test "stdStruct" {
         break :blk struct_test_edge_cases;
     };
     try testCodecRoundTrips(S, struct_codec, &struct_test_edge_cases);
+}
+
+test "stdUnion" {
+    const U = union(enum) {
+        void,
+        char: u8,
+        int: u32,
+        float: f64,
+        record: struct {
+            a: u64,
+            b: u16,
+            c: enum { foo, bar },
+        },
+    };
+    const union_codec: Codec(U) = .stdUnion(&.{
+        .void = .std_void,
+        .char = .std_byte,
+        .int = .std_int,
+        .float = .std_float,
+        .record = .stdStruct(&.{
+            .a = .std_int,
+            .b = .std_int,
+            .c = .std_discriminant,
+        }),
+    });
+
+    try testCodecRoundTrips(U, union_codec, &.{
+        .void,
+        .{ .char = 42 },
+        .{ .int = 1111111111 },
+        .{ .float = -7 },
+        .{ .record = .{ .a = 1, .b = 2, .c = .foo } },
+    });
 }
 
 fn floatTestEdgeCases(comptime F: type) [18]F {
