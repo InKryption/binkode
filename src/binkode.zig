@@ -77,6 +77,7 @@ pub fn Codec(comptime V: type) type {
             null: void,
             mut: ?*anyopaque,
             immut: ?*const anyopaque,
+            payload: if (Payload == noreturn) noreturn else *const Payload,
             fields: if (Fields == noreturn) noreturn else *const Fields,
 
             pub const none: Ctx = .{ .null = {} };
@@ -100,7 +101,12 @@ pub fn Codec(comptime V: type) type {
                 return @ptrCast(@alignCast(raw_ptr));
             }
 
-            pub const Fields: type = switch (@typeInfo(V)) {
+            pub const Payload = switch (@typeInfo(V)) {
+                .optional => |optional_info| Codec(optional_info.child),
+                else => noreturn,
+            };
+
+            pub const Fields = switch (@typeInfo(V)) {
                 inline //
                 .@"struct",
                 .@"union",
@@ -266,6 +272,26 @@ pub fn Codec(comptime V: type) type {
             }
         });
 
+        /// Standard codec for an optional.
+        /// Failure to decode indicates either a failure to decode the boolean, or the potential payload.
+        pub inline fn stdOptional(payload_codec: *const Ctx.Payload) CodecSelf {
+            return .implementPayload(payload_codec, struct {
+                const Unwrapped = @typeInfo(V).optional.child;
+
+                pub fn encode(pl_codec: Ctx.Payload, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                    try std_bool.encode(writer, options, &(value.* != null));
+                    const payload = if (value.*) |*unwrapped| unwrapped else return;
+                    try pl_codec.encode(writer, options, payload);
+                }
+
+                pub fn decode(pl_codec: Ctx.Payload, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                    const is_some = try std_bool.decodeCopy(reader, options);
+                    value.* = if (is_some) @as(Unwrapped, undefined) else null;
+                    if (is_some) try pl_codec.decodeInto(reader, options, &value.*.?);
+                }
+            });
+        }
+
         /// Standard codec for a struct.
         pub inline fn stdStruct(field_codecs: *const Ctx.Fields) CodecSelf {
             return .implementFields(field_codecs, struct {
@@ -381,6 +407,28 @@ pub fn Codec(comptime V: type) type {
         });
 
         // -- Helpers for safely implementing codecs -- //
+
+        /// Expects `methods` to be a namespace with the following methods defined:
+        /// ```zig
+        /// fn encode(payload_codec: Codec(Payload), writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void { ... }
+        /// fn decode(payload_codec: Codec(Payload), reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void { ... }
+        /// ```
+        pub inline fn implementPayload(payload: *const Ctx.Payload, comptime methods: type) CodecSelf {
+            const erased = struct {
+                fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                    try methods.encode(ctx.payload.*, writer, options, value);
+                }
+                fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                    try methods.decode(ctx.payload.*, reader, options, value);
+                }
+            };
+
+            return .{
+                .ctx = .{ .payload = payload },
+                .encodeFn = erased.encodeFn,
+                .decodeFn = erased.decodeFn,
+            };
+        }
 
         /// Expects `methods` to be a namespace with the following methods defined:
         /// ```zig
@@ -505,6 +553,16 @@ test "std_utf8_codepoint" {
     }
     try testCodecRoundTrips(u21, .std_utf8_codepoint, &.{ 'à', 'á', 'é', 'è', 'ì', 'í', 'ò', 'ó', 'ù', 'ú' });
     try testCodecRoundTrips(u21, .std_utf8_codepoint, &.{ '\u{2100}', '\u{3100}', '\u{FFAAA}', '\u{FFFFF}', '\u{FFFFF}' });
+}
+
+test "stdOptional" {
+    try testCodecRoundTrips(?void, .stdOptional(&.std_void), &.{ null, {}, null, {}, null, {} });
+    try testCodecRoundTrips(?bool, .stdOptional(&.std_bool), &.{
+        null, false, null, true, null, true,
+        null, false, true, true, null, false,
+    });
+    try testCodecRoundTrips(?u32, .stdOptional(&.std_int), &.{ null, 4, null, 10000, null, 100000000 });
+    try testCodecRoundTrips(?i64, .stdOptional(&.std_int), &.{ null, -7, null, 20000, null, -100000000 });
 }
 
 test "stdStruct" {
