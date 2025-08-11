@@ -220,19 +220,24 @@ pub fn Codec(comptime V: type) type {
         pub const std_utf8_codepoint: CodecSelf = .implementNull(struct {
             comptime {
                 switch (V) {
+                    u1, u2, u3, u4, u5, u6, u7 => {},
                     u8, u16, u21, u32 => {},
                     else => @compileError("char codec is not implemented for " ++ @typeName(V)),
                 }
             }
 
             pub fn encode(writer: *std.Io.Writer, _: Options, value: *const V) EncodeError!void {
-                if (value.* > std.math.maxInt(u21)) return error.EncodeFailed;
+                if (value.* > std.math.maxInt(u21)) {
+                    return error.EncodeFailed;
+                }
                 const cp_val: u21 = @intCast(value.*);
                 const cp_len = std.unicode.utf8CodepointSequenceLength(cp_val) catch
                     return error.EncodeFailed;
                 var encoded_buffer: [4]u8 = undefined;
                 const encoded = encoded_buffer[0..cp_len];
-                std.unicode.utf8Encode(cp_val, encoded) catch return error.EncodeFailed;
+                const actual_cp_len = std.unicode.utf8Encode(cp_val, encoded) catch
+                    return error.EncodeFailed;
+                std.debug.assert(cp_len == actual_cp_len);
                 try writer.writeAll(encoded);
             }
 
@@ -247,18 +252,23 @@ pub fn Codec(comptime V: type) type {
                 const encoded = encoded_buffer[0..cp_len];
                 encoded[0] = first_byte;
                 if (cp_len != 1) try reader.readSliceAll(encoded[1..]);
-                value.* = switch (cp_len) {
-                    1 => value[0],
+                const cp = switch (cp_len) {
+                    1 => encoded[0],
                     2 => std.unicode.utf8Decode2(encoded[0..2].*),
                     3 => std.unicode.utf8Decode3(encoded[0..3].*),
                     4 => std.unicode.utf8Decode4(encoded[0..4].*),
                     else => unreachable,
                 } catch return error.DecodeFailed;
+                if (cp > std.math.maxInt(V)) {
+                    return error.DecodeFailed;
+                }
+                value.* = @intCast(cp);
             }
         });
 
-        pub inline fn stdStruct(field_contexts: *const Ctx.Fields) CodecSelf {
-            return .implementFields(field_contexts, struct {
+        /// Standard codec for a struct.
+        pub inline fn stdStruct(field_codecs: *const Ctx.Fields) CodecSelf {
+            return .implementFields(field_codecs, struct {
                 pub fn encode(
                     fields: Ctx.Fields,
                     writer: *std.Io.Writer,
@@ -266,8 +276,8 @@ pub fn Codec(comptime V: type) type {
                     value: *const V,
                 ) EncodeError!void {
                     inline for (@typeInfo(V).@"struct".fields) |s_field| {
-                        const field_ctx: Codec(s_field.type) = @field(fields, s_field.name);
-                        try field_ctx.encode(writer, options, &@field(value, s_field.name));
+                        const field_codec: Codec(s_field.type) = @field(fields, s_field.name);
+                        try field_codec.encode(writer, options, &@field(value, s_field.name));
                     }
                 }
 
@@ -278,21 +288,22 @@ pub fn Codec(comptime V: type) type {
                     value: *V,
                 ) DecodeError!void {
                     inline for (@typeInfo(V).@"struct".fields) |s_field| {
-                        const field_ctx: Codec(s_field.type) = @field(fields, s_field.name);
-                        try field_ctx.decodeInto(reader, options, &@field(value, s_field.name));
+                        const field_codec: Codec(s_field.type) = @field(fields, s_field.name);
+                        try field_codec.decodeInto(reader, options, &@field(value, s_field.name));
                     }
                 }
             });
         }
 
-        /// AKA "enums" in the bincode specification, written in the context of rust.
+        /// Standard codec for a tagged union, aka "enums" in the bincode specification, written in the context of rust.
+        /// Also see: `std_discriminant`.
         pub inline fn stdUnion(field_contexts: *const Ctx.Fields) CodecSelf {
             return .implementFields(field_contexts, struct {
                 const union_info = @typeInfo(V).@"union";
                 const tag_codec: Codec(union_info.tag_type.?) = .std_discriminant;
 
                 pub fn encode(
-                    fields: Ctx.Fields,
+                    field_codecs: Ctx.Fields,
                     writer: *std.Io.Writer,
                     options: Options,
                     value: *const V,
@@ -302,14 +313,14 @@ pub fn Codec(comptime V: type) type {
                     switch (value.*) {
                         inline else => |*payload, itag| {
                             const Payload = @TypeOf(payload.*);
-                            const field_ctx: Codec(Payload) = @field(fields, @tagName(itag));
-                            try field_ctx.encode(writer, options, payload);
+                            const field_codec: Codec(Payload) = @field(field_codecs, @tagName(itag));
+                            try field_codec.encode(writer, options, payload);
                         },
                     }
                 }
 
                 pub fn decode(
-                    fields: Ctx.Fields,
+                    payload_codecs: Ctx.Fields,
                     reader: *std.Io.Reader,
                     options: Options,
                     value: *V,
@@ -318,8 +329,8 @@ pub fn Codec(comptime V: type) type {
                         inline else => |itag| {
                             value.* = @unionInit(V, @tagName(itag), undefined);
                             const Payload = @FieldType(V, @tagName(itag));
-                            const payload_ctx: Codec(Payload) = @field(fields, @tagName(itag));
-                            try payload_ctx.decodeInto(reader, options, &@field(value, @tagName(itag)));
+                            const payload_codec: Codec(Payload) = @field(payload_codecs, @tagName(itag));
+                            try payload_codec.decodeInto(reader, options, &@field(value, @tagName(itag)));
                         },
                     }
                 }
@@ -371,6 +382,11 @@ pub fn Codec(comptime V: type) type {
 
         // -- Helpers for safely implementing codecs -- //
 
+        /// Expects `methods` to be a namespace with the following methods defined:
+        /// ```zig
+        /// fn encode(fields_codec: CodecSelf.Ctx.Fields, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void { ... }
+        /// fn decode(fields_codec: CodecSelf.Ctx.Fields, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void { ... }
+        /// ```
         pub inline fn implementFields(fields: *const Ctx.Fields, comptime methods: type) CodecSelf {
             const erased = struct {
                 fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
@@ -393,7 +409,6 @@ pub fn Codec(comptime V: type) type {
         /// fn encode(writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void { ... }
         /// fn decode(reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void { ... }
         /// ```
-        /// Returns a stateless codec with the wrapped type-erased encode/decode method callbacks.
         pub inline fn implementNull(comptime methods: type) CodecSelf {
             const erased = struct {
                 fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
@@ -475,6 +490,21 @@ test "std_float" {
     try testCodecRoundTrips(f64, .std_float, &.{ 1, 5, 1000000000, 32, 8 });
     try testCodecRoundTrips(f32, .std_float, &floatTestEdgeCases(f32));
     try testCodecRoundTrips(f64, .std_float, &floatTestEdgeCases(f64));
+}
+
+test "std_utf8_codepoint" {
+    try testCodecRoundTrips(u8, .std_utf8_codepoint, &@as([128]u8, std.simd.iota(u8, 128))); // ascii
+    inline for (.{ u1, u2, u3, u4, u5, u6, u7, u8, u16, u21, u32 }) |AsciiInt| {
+        const max_val = @min(127, std.math.maxInt(AsciiInt));
+        const ascii_vals: [max_val + 1]AsciiInt = std.simd.iota(AsciiInt, max_val + 1);
+        try testCodecRoundTrips(
+            AsciiInt,
+            .std_utf8_codepoint,
+            &ascii_vals,
+        );
+    }
+    try testCodecRoundTrips(u21, .std_utf8_codepoint, &.{ 'à', 'á', 'é', 'è', 'ì', 'í', 'ò', 'ó', 'ù', 'ú' });
+    try testCodecRoundTrips(u21, .std_utf8_codepoint, &.{ '\u{2100}', '\u{3100}', '\u{FFAAA}', '\u{FFFFF}', '\u{FFFFF}' });
 }
 
 test "stdStruct" {
