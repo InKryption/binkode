@@ -26,35 +26,33 @@ pub fn StdInt(comptime V: type) type {
         break :blk .{ Int, int_info.signedness };
     };
     return struct {
-        pub fn encode(writer: *std.Io.Writer, options: bk.Options, value: Int) bk.EncodeError!void {
-            const int_encoding: bk.IntEncoding = options.int;
-            switch (int_encoding) {
+        pub fn encode(writer: *std.Io.Writer, config: bk.Config, value: Int) bk.EncodeWriterError!void {
+            switch (config.int) {
                 .fixint => {
-                    try writer.writeInt(Int, value, options.endian);
+                    try writer.writeInt(Int, value, config.endian);
                 },
                 .varint => {
                     var buffer: [bk.varint.IntKind.fullEncodedLen(.maximum)]u8 = undefined;
                     const int_kind = bk.varint.encode(switch (signedness) {
                         .signed => zigzag.signedToUnsigned(Int, value),
                         .unsigned => value,
-                    }, &buffer, options.endian);
+                    }, &buffer, config.endian);
                     try writer.writeAll(buffer[0..int_kind.fullEncodedLen()]);
                 },
             }
         }
 
-        pub fn decode(reader: *std.Io.Reader, options: bk.Options) bk.DecodeError!V {
-            const int_encoding: bk.IntEncoding = options.int;
-            switch (int_encoding) {
+        pub fn decode(reader: *std.Io.Reader, config: bk.Config) bk.DecodeReaderError!V {
+            switch (config.int) {
                 .fixint => {
                     var int_bytes: [@sizeOf(Int)]u8 = undefined;
                     try reader.readSliceAll(&int_bytes);
-                    const int = std.mem.readInt(Int, &int_bytes, options.endian);
+                    const int = std.mem.readInt(Int, &int_bytes, config.endian);
                     if (int > std.math.maxInt(V)) return error.DecodeFailed;
                     return @intCast(int);
                 },
                 .varint => {
-                    const raw_int = try bk.varint.decodeReader(reader, options.endian);
+                    const raw_int = try bk.varint.decodeReader(reader, config.endian);
                     switch (signedness) {
                         .signed => {
                             const EncodedInt = zigzag.SignedAsUnsigned(Int);
