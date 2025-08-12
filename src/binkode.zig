@@ -437,7 +437,25 @@ pub fn Codec(comptime V: type) type {
             }
         });
 
+        /// Standard codec for a byte array. Writes no length.
+        /// Optimization over `stdArray(&.std_byte)`.
+        ///
+        /// Failure to decode indicates the stream ended before filling the array.
+        pub const std_byte_array: CodecSelf = .implementNull(struct {
+            pub fn encode(writer: *std.Io.Writer, _: Options, value: *const V) EncodeError!void {
+                try writer.writeAll(value);
+            }
+
+            pub fn decode(reader: *std.Io.Reader, _: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
+                reader.readSliceAll(value) catch |err| switch (err) {
+                    error.ReadFailed => |e| return e,
+                    error.EndOfStream => return error.DecodeFailed,
+                };
+            }
+        });
+
         /// Standard codec for an array. Writes no length.
+        /// Also see `std_byte_array`.
         pub inline fn stdArray(element_codec: *const Codec(Ctx.Child)) CodecSelf {
             return .implementChild(element_codec, struct {
                 const not_implemented_err_msg = "array codec not is not implemented for type " ++ @typeName(V);
@@ -713,6 +731,10 @@ test "stdUnion" {
         .{ .float = -7 },
         .{ .record = .{ .a = 1, .b = 2, .c = .foo } },
     });
+}
+
+test "std_byte_array" {
+    try testCodecRoundTrips([3]u8, .std_byte_array, &.{ "foo".*, "bar".*, "baz".* });
 }
 
 test "stdArray" {
