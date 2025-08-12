@@ -769,7 +769,7 @@ fn testCodecRoundTrips(
 
         var encoded_reader: std.Io.Reader = .fixed(buffer.items);
         for (values) |expected_int| {
-            try std.testing.expectEqual(expected_int, codec.decodeCopy(&encoded_reader, options));
+            try std.testing.expectEqualDeep(expected_int, codec.decodeCopy(&encoded_reader, options));
         }
         try std.testing.expectEqual(0, encoded_reader.bufferedLen());
     }
