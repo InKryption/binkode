@@ -33,6 +33,7 @@ pub const DecodeError = std.Io.Reader.Error || std.mem.Allocator.Error || error{
 ///
 /// NOTE: many methods in and adjacent to `Codec` are `inline` in order to propagate comptime-knowness.
 pub fn Codec(comptime V: type) type {
+    if (V == noreturn) unreachable;
     return struct {
         /// This is to be used by the codec implementation to modify behaviour, and/or report additional context.
         ctx: Ctx,
@@ -108,6 +109,7 @@ pub fn Codec(comptime V: type) type {
             null: void,
             mut: ?*anyopaque,
             immut: ?*const anyopaque,
+            elem: if (Elem == noreturn) noreturn else *const Codec(Elem),
             child: if (Child == noreturn) noreturn else *const Codec(Child),
             fields: if (Fields == noreturn) noreturn else *const Fields,
 
@@ -134,9 +136,22 @@ pub fn Codec(comptime V: type) type {
 
             pub const Child = switch (@typeInfo(V)) {
                 .optional => |optional_info| optional_info.child,
+                .pointer => |ptr_info| ptr_info.child,
+                else => noreturn,
+            };
+
+            pub const Elem = switch (@typeInfo(V)) {
                 .array => |array_info| array_info.child,
                 .vector => |vec_info| vec_info.child,
-                .pointer => |ptr_info| ptr_info.child,
+                .pointer => |ptr_info| switch (ptr_info.size) {
+                    .one => switch (@typeInfo(ptr_info.child)) {
+                        .array => |array_info| array_info.child,
+                        .vector => |vec_info| vec_info.child,
+                        else => noreturn,
+                    },
+                    .slice => ptr_info.child,
+                    else => noreturn,
+                },
                 else => noreturn,
             };
 
@@ -535,12 +550,12 @@ pub fn Codec(comptime V: type) type {
 
         /// Standard codec for an array. Encodes no length.
         /// Also see `std_byte_array`.
-        pub inline fn stdArray(element_codec: *const Codec(Ctx.Child)) CodecSelf {
-            return .implementChild(element_codec, struct {
+        pub inline fn stdArray(element_codec: *const Codec(Ctx.Elem)) CodecSelf {
+            return .implementElem(element_codec, struct {
                 const not_implemented_err_msg = "array codec not is not implemented for type " ++ @typeName(V);
 
                 pub fn encode(
-                    elem_codec: Codec(Ctx.Child),
+                    elem_codec: Codec(Ctx.Elem),
                     writer: *std.Io.Writer,
                     options: Options,
                     value: *const V,
@@ -553,7 +568,7 @@ pub fn Codec(comptime V: type) type {
                 }
 
                 pub fn decode(
-                    elem_codec: Codec(Ctx.Child),
+                    elem_codec: Codec(Ctx.Elem),
                     reader: *std.Io.Reader,
                     options: Options,
                     gpa_opt: ?std.mem.Allocator,
@@ -567,7 +582,7 @@ pub fn Codec(comptime V: type) type {
                 }
 
                 pub fn free(
-                    elem_codec: Codec(Ctx.Child),
+                    elem_codec: Codec(Ctx.Elem),
                     gpa_opt: ?std.mem.Allocator,
                     value: *const V,
                 ) void {
@@ -622,8 +637,8 @@ pub fn Codec(comptime V: type) type {
         /// Standard codec for a slice. Encodes the length.
         /// Also see `std_byte_array`.
         /// Decoding allocates the result.
-        pub inline fn stdSlice(child: *const Codec(Ctx.Child)) CodecSelf {
-            return .implementChild(child, struct {
+        pub inline fn stdSlice(child: *const Codec(Ctx.Elem)) CodecSelf {
+            return .implementElem(child, struct {
                 const ptr_info = @typeInfo(V).pointer;
                 comptime {
                     if (ptr_info.size != .slice) @compileError(
@@ -632,7 +647,7 @@ pub fn Codec(comptime V: type) type {
                 }
 
                 pub fn encode(
-                    elem_codec: Codec(Ctx.Child),
+                    elem_codec: Codec(Ctx.Elem),
                     writer: *std.Io.Writer,
                     options: Options,
                     value: *const V,
@@ -642,7 +657,7 @@ pub fn Codec(comptime V: type) type {
                 }
 
                 pub fn decode(
-                    elem_codec: Codec(Ctx.Child),
+                    elem_codec: Codec(Ctx.Elem),
                     reader: *std.Io.Reader,
                     options: Options,
                     gpa_opt: ?std.mem.Allocator,
@@ -664,7 +679,7 @@ pub fn Codec(comptime V: type) type {
                 }
 
                 pub fn free(
-                    elem_codec: Codec(Ctx.Child),
+                    elem_codec: Codec(Ctx.Elem),
                     gpa_opt: ?std.mem.Allocator,
                     value: *const V,
                 ) void {
@@ -672,6 +687,103 @@ pub fn Codec(comptime V: type) type {
                     if (elem_codec.freeFn != null) {
                         for (value.*) |*elem| elem_codec.free(gpa, elem);
                     }
+                    gpa.free(value.*);
+                }
+            });
+        }
+
+        /// Standard codec for a byte array pointer. Encodes the length.
+        /// Optimization over `stdArrayPtr(&.std_byte)`.
+        /// Decoding allocates the result.
+        pub const std_byte_array_ptr: CodecSelf = .implementNull(struct {
+            const ptr_info = @typeInfo(V).pointer;
+            comptime {
+                if (ptr_info.size != .one or @typeInfo(ptr_info.child) != .array) @compileError(
+                    "array ptr codec is not implemented for type " ++ @typeName(V),
+                );
+            }
+
+            pub fn encode(writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                try Codec(usize).std_int.encode(writer, options, &value.*.len);
+                try writer.writeAll(value.*);
+            }
+
+            pub fn decode(reader: *std.Io.Reader, options: Options, gpa_opt: ?std.mem.Allocator, value: *V) DecodeError!void {
+                const gpa = gpa_opt.?;
+
+                const expected_len = @typeInfo(ptr_info.child).array.len;
+                const actual_len = try Codec(usize).std_int.decodeCopy(reader, options, null);
+                if (actual_len != expected_len) return error.DecodeFailed;
+
+                const slice = (try gpa.alignedAlloc(
+                    u8,
+                    .fromByteUnits(ptr_info.alignment),
+                    actual_len,
+                ))[0..expected_len];
+
+                try reader.readSliceAll(slice);
+                value.* = slice;
+            }
+
+            pub fn free(gpa_opt: ?std.mem.Allocator, value: *const V) void {
+                const gpa = gpa_opt.?;
+                gpa.free(value.*);
+            }
+        });
+
+        /// Standard codec for an array pointer. Encodes the length.
+        /// Also see `std_byte_array_ptr`.
+        /// Decoding allocates the result.
+        pub inline fn stdArrayPtr(elem: *const Codec(Ctx.Elem)) CodecSelf {
+            return .implementElem(elem, struct {
+                const ptr_info = @typeInfo(V).pointer;
+                comptime {
+                    if (ptr_info.size != .one or @typeInfo(ptr_info.child) != .array) @compileError(
+                        "array ptr codec is not implemented for type " ++ @typeName(V),
+                    );
+                }
+
+                pub fn encode(
+                    elem_codec: Codec(Ctx.Elem),
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
+                    try Codec(usize).std_int.encode(writer, options, &value.*.len);
+                    try Codec(ptr_info.child).stdArray(&elem_codec).encode(writer, options, value.*);
+                }
+
+                pub fn decode(
+                    elem_codec: Codec(Ctx.Elem),
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *V,
+                ) DecodeError!void {
+                    const gpa = gpa_opt.?;
+
+                    const expected_len = @typeInfo(ptr_info.child).array.len;
+                    const actual_len = try Codec(usize).std_int.decodeCopy(reader, options, null);
+                    if (actual_len != expected_len) return error.DecodeFailed;
+
+                    const slice = (try gpa.alignedAlloc(
+                        @typeInfo(ptr_info.child).array.child,
+                        .fromByteUnits(ptr_info.alignment),
+                        actual_len,
+                    ))[0..expected_len];
+                    errdefer gpa.free(slice);
+
+                    try Codec(ptr_info.child).stdArray(&elem_codec).decodeInto(reader, options, gpa, slice);
+                    value.* = slice;
+                }
+
+                pub fn free(
+                    elem_codec: Codec(Ctx.Elem),
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *const V,
+                ) void {
+                    const gpa = gpa_opt.?;
+                    Codec(ptr_info.child).stdArray(&elem_codec).free(gpa, value.*);
                     gpa.free(value.*);
                 }
             });
@@ -732,6 +844,44 @@ pub fn Codec(comptime V: type) type {
         }
 
         // -- Helpers for safely implementing codecs -- //
+
+        /// Expects `methods` to be a namespace with the following methods defined:
+        /// ```zig
+        /// fn encode(child_codec: Codec(Ctx.Child), writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void { ... }
+        /// fn decode(child_codec: Codec(Ctx.Child), reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void { ... }
+        /// ```
+        pub inline fn implementElem(elem: *const Codec(Ctx.Elem), comptime methods: type) CodecSelf {
+            const erased = struct {
+                fn encodeFn(
+                    ctx: Ctx,
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
+                    try methods.encode(ctx.elem.*, writer, options, value);
+                }
+                fn decodeFn(
+                    ctx: Ctx,
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *V,
+                ) DecodeError!void {
+                    try methods.decode(ctx.elem.*, reader, options, gpa_opt, value);
+                }
+
+                fn freeFn(ctx: Ctx, gpa_opt: ?std.mem.Allocator, value: *const V) void {
+                    methods.free(ctx.elem.*, gpa_opt, value);
+                }
+            };
+
+            return .{
+                .ctx = .{ .elem = elem },
+                .encodeFn = erased.encodeFn,
+                .decodeFn = erased.decodeFn,
+                .freeFn = if (@TypeOf(methods.free) != void) erased.freeFn else null,
+            };
+        }
 
         /// Expects `methods` to be a namespace with the following methods defined:
         /// ```zig
@@ -1032,6 +1182,31 @@ test "stdSlice" {
         &.{ 12, 13, 14, 15, 16, 17 },
         &.{ 18, 19, 20, 21, 22, 23, 24 },
         &.{ 25, 26, 27, 28, 29, 30, 31, 32 },
+    });
+}
+
+test "std_byte_array_ptr" {
+    try testCodecRoundTrips(*const [3]u8, .std_byte_array_ptr, &.{
+        "foo",
+        "bar",
+        "baz",
+        &.{ 0, 1, 2 },
+        &.{ 3, 4, 5 },
+        &.{ 7, 8, 9 },
+        &.{ 12, 13, 14 },
+        &.{ 18, 19, 20 },
+        &.{ 25, 26, 27 },
+    });
+}
+
+test "stdArrayPtr" {
+    try testCodecRoundTrips(*const [3]u32, .stdArrayPtr(&.std_int), &.{
+        &.{ 0, 1, 2 },
+        &.{ 3, 4, 5 },
+        &.{ 7, 8, 9 },
+        &.{ 12, 13, 14 },
+        &.{ 18, 19, 20 },
+        &.{ 25, 26, 27 },
     });
 }
 
