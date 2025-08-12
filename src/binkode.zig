@@ -575,6 +575,60 @@ pub fn Codec(comptime V: type) type {
             });
         }
 
+        /// Standard codec for a single item pointer.
+        /// Allocates the result.
+        pub inline fn stdSingleItemPtr(child: *const Codec(Ctx.Child)) CodecSelf {
+            return .implementChild(child, struct {
+                const ptr_info = @typeInfo(V).pointer;
+                comptime {
+                    if (ptr_info.size != .one) @compileError(
+                        "single item ptr codec is not implemented for type " ++ @typeName(V),
+                    );
+                }
+
+                pub fn encode(
+                    elem_codec: Codec(Ctx.Child),
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
+                    try elem_codec.encode(writer, options, value.*);
+                }
+
+                pub fn decode(
+                    elem_codec: Codec(Ctx.Child),
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    value: *V,
+                    gpa_opt: ?std.mem.Allocator,
+                ) DecodeError!void {
+                    const gpa = gpa_opt.?;
+                    const aligned_bytes = try gpa.alignedAlloc(
+                        u8,
+                        .fromByteUnits(ptr_info.alignment),
+                        @sizeOf(ptr_info.child),
+                    );
+                    errdefer gpa.free(aligned_bytes);
+                    const ptr = std.mem.bytesAsValue(
+                        ptr_info.child,
+                        aligned_bytes[0..@sizeOf(ptr_info.child)],
+                    );
+                    try elem_codec.decodeInto(reader, options, ptr, gpa_opt);
+                    value.* = ptr;
+                }
+
+                pub fn free(
+                    elem_codec: Codec(Ctx.Child),
+                    value: *const V,
+                    gpa_opt: ?std.mem.Allocator,
+                ) void {
+                    const gpa = gpa_opt.?;
+                    elem_codec.free(value.*, gpa_opt);
+                    gpa.destroy(value.*);
+                }
+            });
+        }
+
         // -- Helpers for safely implementing codecs -- //
 
         /// Expects `methods` to be a namespace with the following methods defined:
@@ -853,6 +907,12 @@ test "stdArray" {
         .{ -1.0, 2 },
         .{ 61, -313131 },
         @splat(111111111.0),
+    });
+}
+
+test "stdSingleItemPtr" {
+    try testCodecRoundTrips(*const u32, .stdSingleItemPtr(&.std_int), &.{
+        &0, &1, &2, &10000, &std.math.maxInt(u32),
     });
 }
 
