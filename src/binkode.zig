@@ -516,8 +516,6 @@ pub fn Codec(comptime V: type) type {
 
         /// Standard codec for a byte array. Encodes no length.
         /// Optimization over `stdArray(&.std_byte)`.
-        ///
-        /// Failure to decode indicates the stream ended before filling the array.
         pub const std_byte_array: CodecSelf = .implementNull(struct {
             pub fn encode(writer: *std.Io.Writer, _: Options, value: *const V) EncodeError!void {
                 try writer.writeAll(value);
@@ -529,10 +527,7 @@ pub fn Codec(comptime V: type) type {
                 _: ?std.mem.Allocator,
                 value: *V,
             ) DecodeError!void {
-                reader.readSliceAll(value) catch |err| switch (err) {
-                    error.ReadFailed => |e| return e,
-                    error.EndOfStream => return error.DecodeFailed,
-                };
+                try reader.readSliceAll(value);
             }
 
             pub const free = {};
@@ -582,6 +577,102 @@ pub fn Codec(comptime V: type) type {
                         .vector => |vec_info| for (0..vec_info.len) |i| elem_codec.free(gpa_opt, &value[i]),
                         else => @compileError(not_implemented_err_msg),
                     }
+                }
+            });
+        }
+
+        /// Standard codec for a byte slice. Encodes the length.
+        /// Optimization over `stdSlice(&.std_byte)`.
+        /// Decoding allocates the result.
+        pub const std_byte_slice: CodecSelf = .implementNull(struct {
+            const ptr_info = @typeInfo(V).pointer;
+            comptime {
+                if (ptr_info.size != .slice) @compileError(
+                    "single item ptr codec is not implemented for type " ++ @typeName(V),
+                );
+            }
+
+            pub fn encode(writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                try Codec(usize).std_int.encode(writer, options, &value.len);
+                try writer.writeAll(value.*);
+            }
+
+            pub fn decode(
+                reader: *std.Io.Reader,
+                options: Options,
+                gpa_opt: ?std.mem.Allocator,
+                value: *V,
+            ) DecodeError!void {
+                const gpa = gpa_opt.?;
+
+                const len = try Codec(usize).std_int.decodeCopy(reader, options, null);
+                const slice = try gpa.alignedAlloc(u8, .fromByteUnits(ptr_info.alignment), len);
+                errdefer gpa.free(slice);
+
+                try reader.readSliceAll(slice);
+                value.* = slice;
+            }
+
+            pub fn free(gpa_opt: ?std.mem.Allocator, value: *const V) void {
+                const gpa = gpa_opt.?;
+                gpa.free(value.*);
+            }
+        });
+
+        /// Standard codec for a slice. Encodes the length.
+        /// Also see `std_byte_array`.
+        /// Decoding allocates the result.
+        pub inline fn stdSlice(child: *const Codec(Ctx.Child)) CodecSelf {
+            return .implementChild(child, struct {
+                const ptr_info = @typeInfo(V).pointer;
+                comptime {
+                    if (ptr_info.size != .slice) @compileError(
+                        "single item ptr codec is not implemented for type " ++ @typeName(V),
+                    );
+                }
+
+                pub fn encode(
+                    elem_codec: Codec(Ctx.Child),
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
+                    try Codec(usize).std_int.encode(writer, options, &value.len);
+                    for (value.*) |*elem| try elem_codec.encode(writer, options, elem);
+                }
+
+                pub fn decode(
+                    elem_codec: Codec(Ctx.Child),
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *V,
+                ) DecodeError!void {
+                    const gpa = gpa_opt.?;
+
+                    const len = try Codec(usize).std_int.decodeCopy(reader, options, null);
+                    const slice = try gpa.alignedAlloc(ptr_info.child, .fromByteUnits(ptr_info.alignment), len);
+                    errdefer gpa.free(slice);
+
+                    for (slice, 0..) |*elem, i| {
+                        errdefer if (elem_codec.freeFn != null) {
+                            for (slice[0..i]) |*prev| elem_codec.free(gpa, prev);
+                        };
+                        try elem_codec.decodeInto(reader, options, gpa, elem);
+                    }
+                    value.* = slice;
+                }
+
+                pub fn free(
+                    elem_codec: Codec(Ctx.Child),
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *const V,
+                ) void {
+                    const gpa = gpa_opt.?;
+                    if (elem_codec.freeFn != null) {
+                        for (value.*) |*elem| elem_codec.free(gpa, elem);
+                    }
+                    gpa.free(value.*);
                 }
             });
         }
@@ -636,105 +727,6 @@ pub fn Codec(comptime V: type) type {
                     const gpa = gpa_opt.?;
                     elem_codec.free(gpa, value.*);
                     gpa.destroy(value.*);
-                }
-            });
-        }
-
-        /// Standard codec for a byte slice. Encodes the length.
-        /// Optimization over `stdSlice(&.std_byte)`.
-        ///
-        /// Failure to decode indicates the stream ended before filling the array.
-        pub const std_byte_slice: CodecSelf = .implementNull(struct {
-            const ptr_info = @typeInfo(V).pointer;
-            comptime {
-                if (ptr_info.size != .slice) @compileError(
-                    "single item ptr codec is not implemented for type " ++ @typeName(V),
-                );
-            }
-
-            pub fn encode(writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
-                try Codec(usize).std_int.encode(writer, options, &value.len);
-                try writer.writeAll(value.*);
-            }
-
-            pub fn decode(
-                reader: *std.Io.Reader,
-                options: Options,
-                gpa_opt: ?std.mem.Allocator,
-                value: *V,
-            ) DecodeError!void {
-                const gpa = gpa_opt.?;
-
-                const len = try Codec(usize).std_int.decodeCopy(reader, options, null);
-                const slice = try gpa.alignedAlloc(u8, .fromByteUnits(ptr_info.alignment), len);
-                errdefer gpa.free(slice);
-
-                reader.readSliceAll(slice) catch |err| switch (err) {
-                    error.ReadFailed => |e| return e,
-                    error.EndOfStream => return error.DecodeFailed,
-                };
-                value.* = slice;
-            }
-
-            pub fn free(gpa_opt: ?std.mem.Allocator, value: *const V) void {
-                const gpa = gpa_opt.?;
-                gpa.free(value.*);
-            }
-        });
-
-        /// Standard codec for a slice. Encodes the length.
-        /// Decoding allocates the result.
-        pub inline fn stdSlice(child: *const Codec(Ctx.Child)) CodecSelf {
-            return .implementChild(child, struct {
-                const ptr_info = @typeInfo(V).pointer;
-                comptime {
-                    if (ptr_info.size != .slice) @compileError(
-                        "single item ptr codec is not implemented for type " ++ @typeName(V),
-                    );
-                }
-
-                pub fn encode(
-                    elem_codec: Codec(Ctx.Child),
-                    writer: *std.Io.Writer,
-                    options: Options,
-                    value: *const V,
-                ) EncodeError!void {
-                    try Codec(usize).std_int.encode(writer, options, &value.len);
-                    for (value.*) |*elem| try elem_codec.encode(writer, options, elem);
-                }
-
-                pub fn decode(
-                    elem_codec: Codec(Ctx.Child),
-                    reader: *std.Io.Reader,
-                    options: Options,
-                    gpa_opt: ?std.mem.Allocator,
-                    value: *V,
-                ) DecodeError!void {
-                    const gpa = gpa_opt.?;
-
-                    const len = try Codec(usize).std_int.decodeCopy(reader, options, null);
-                    const slice = try gpa.alignedAlloc(ptr_info.child, .fromByteUnits(ptr_info.alignment), len);
-                    errdefer gpa.free(slice);
-
-                    for (slice, 0..) |*elem, i| {
-                        errdefer if (elem_codec.freeFn != null) {
-                            for (slice[0..i]) |*prev| elem_codec.free(gpa, prev);
-                        };
-                        try elem_codec.decodeInto(reader, options, gpa, elem);
-                    }
-                    value.* = slice;
-                }
-
-                pub fn free(
-                    elem_codec: Codec(Ctx.Child),
-                    gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
-                ) void {
-                    const gpa = gpa_opt.?;
-                    if (elem_codec.freeFn != null) {
-                        for (value.*) |*elem| elem_codec.free(gpa, elem);
-                    }
-                    gpa.free(value.*);
                 }
             });
         }
@@ -1025,12 +1017,6 @@ test "stdArray" {
     });
 }
 
-test "stdSingleItemPtr" {
-    try testCodecRoundTrips(*const u32, .stdSingleItemPtr(&.std_int), &.{
-        &0, &1, &2, &10000, &std.math.maxInt(u32),
-    });
-}
-
 test "std_byte_slice" {
     try testCodecRoundTrips([]const u8, .std_byte_slice, &.{
         &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }, "foo",  "bar",  "baz",
@@ -1046,6 +1032,12 @@ test "stdSlice" {
         &.{ 12, 13, 14, 15, 16, 17 },
         &.{ 18, 19, 20, 21, 22, 23, 24 },
         &.{ 25, 26, 27, 28, 29, 30, 31, 32 },
+    });
+}
+
+test "stdSingleItemPtr" {
+    try testCodecRoundTrips(*const u32, .stdSingleItemPtr(&.std_int), &.{
+        &0, &1, &2, &10000, &std.math.maxInt(u32),
     });
 }
 
