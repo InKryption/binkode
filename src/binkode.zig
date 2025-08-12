@@ -23,7 +23,7 @@ pub const EncodeError = std.Io.Writer.Error || error{
     EncodeFailed,
 };
 
-pub const DecodeError = std.Io.Reader.Error || error{
+pub const DecodeError = std.Io.Reader.Error || std.mem.Allocator.Error || error{
     /// Codec implementation failed to decode value.
     DecodeFailed,
 };
@@ -36,10 +36,23 @@ pub fn Codec(comptime V: type) type {
     return struct {
         /// This is to be used by the codec implementation to modify behaviour, and/or report additional context.
         ctx: Ctx,
+
         /// Serializes `value.*` to the `writer` stream.
-        encodeFn: *const fn (ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void,
+        encodeFn: *const fn (
+            ctx: Ctx,
+            writer: *std.Io.Writer,
+            options: Options,
+            value: *const V,
+        ) EncodeError!void,
+
         /// Deserializes into `value.*` from the `reader` stream.
-        decodeFn: *const fn (ctx: Ctx, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void,
+        decodeFn: *const fn (
+            ctx: Ctx,
+            reader: *std.Io.Reader,
+            options: Options,
+            value: *V,
+            gpa_opt: ?std.mem.Allocator,
+        ) DecodeError!void,
         const CodecSelf = @This();
 
         // NOTE: functions here are marked inline in order to preserve the comptime-knowness of
@@ -58,9 +71,10 @@ pub fn Codec(comptime V: type) type {
             self: CodecSelf,
             reader: *std.Io.Reader,
             options: Options,
+            gpa_opt: ?std.mem.Allocator,
         ) DecodeError!V {
             var value: V = undefined;
-            try self.decodeInto(reader, options, &value);
+            try self.decodeInto(reader, options, &value, gpa_opt);
             return value;
         }
 
@@ -69,8 +83,9 @@ pub fn Codec(comptime V: type) type {
             reader: *std.Io.Reader,
             options: Options,
             value: *V,
+            gpa_opt: ?std.mem.Allocator,
         ) DecodeError!void {
-            return self.decodeFn(self.ctx, reader, options, value);
+            return self.decodeFn(self.ctx, reader, options, value, gpa_opt);
         }
 
         pub const Ctx = union {
@@ -153,10 +168,11 @@ pub fn Codec(comptime V: type) type {
                 _ = value;
             }
 
-            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V, gpa_opt: ?std.mem.Allocator) DecodeError!void {
                 _ = reader;
                 _ = options;
                 _ = value;
+                _ = gpa_opt;
             }
         });
 
@@ -167,7 +183,7 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeByte(value.*);
             }
 
-            pub fn decode(reader: *std.Io.Reader, _: Options, value: *u8) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, _: Options, value: *u8, _: ?std.mem.Allocator) DecodeError!void {
                 value.* = try reader.takeByte();
             }
         });
@@ -179,7 +195,7 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeByte(@intFromBool(value.*));
             }
 
-            pub fn decode(reader: *std.Io.Reader, _: Options, value: *bool) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, _: Options, value: *bool, _: ?std.mem.Allocator) DecodeError!void {
                 value.* = switch (try reader.takeByte()) {
                     0 => false,
                     1 => true,
@@ -195,7 +211,7 @@ pub fn Codec(comptime V: type) type {
                 try StdInt(V).encode(writer, options, value.*);
             }
 
-            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
                 value.* = try StdInt(V).decode(reader, options);
             }
         });
@@ -216,7 +232,7 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeAll(@ptrCast(&as_int_endian));
             }
 
-            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
                 try reader.readSliceAll(@ptrCast(value));
                 value.* = @bitCast(std.mem.nativeTo(AsInt, @bitCast(value.*), options.endian));
             }
@@ -249,7 +265,7 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeAll(encoded);
             }
 
-            pub fn decode(reader: *std.Io.Reader, _: Options, value: *V) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, _: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
                 const first_byte = first_byte: {
                     var first_byte: u8 = undefined;
                     try reader.readSliceAll((&first_byte)[0..1]);
@@ -296,10 +312,11 @@ pub fn Codec(comptime V: type) type {
                     reader: *std.Io.Reader,
                     options: Options,
                     value: *V,
+                    gpa_opt: ?std.mem.Allocator,
                 ) DecodeError!void {
-                    const is_some = try std_bool.decodeCopy(reader, options);
+                    const is_some = try std_bool.decodeCopy(reader, options, null);
                     value.* = if (is_some) @as(Unwrapped, undefined) else null;
-                    if (is_some) try pl_codec.decodeInto(reader, options, &value.*.?);
+                    if (is_some) try pl_codec.decodeInto(reader, options, &value.*.?, gpa_opt);
                 }
             });
         }
@@ -324,10 +341,11 @@ pub fn Codec(comptime V: type) type {
                     reader: *std.Io.Reader,
                     options: Options,
                     value: *V,
+                    gpa_opt: ?std.mem.Allocator,
                 ) DecodeError!void {
                     inline for (@typeInfo(V).@"struct".fields) |s_field| {
                         const field_codec: Codec(s_field.type) = @field(fields, s_field.name);
-                        try field_codec.decodeInto(reader, options, &@field(value, s_field.name));
+                        try field_codec.decodeInto(reader, options, &@field(value, s_field.name), gpa_opt);
                     }
                 }
             });
@@ -362,13 +380,14 @@ pub fn Codec(comptime V: type) type {
                     reader: *std.Io.Reader,
                     options: Options,
                     value: *V,
+                    gpa_opt: ?std.mem.Allocator,
                 ) DecodeError!void {
-                    switch (try tag_codec.decodeCopy(reader, options)) {
+                    switch (try tag_codec.decodeCopy(reader, options, null)) {
                         inline else => |itag| {
                             value.* = @unionInit(V, @tagName(itag), undefined);
                             const Payload = @FieldType(V, @tagName(itag));
                             const payload_codec: Codec(Payload) = @field(payload_codecs, @tagName(itag));
-                            try payload_codec.decodeInto(reader, options, &@field(value, @tagName(itag)));
+                            try payload_codec.decodeInto(reader, options, &@field(value, @tagName(itag)), gpa_opt);
                         },
                     }
                 }
@@ -399,8 +418,8 @@ pub fn Codec(comptime V: type) type {
                 return Codec(u32).std_int.encode(writer, options, &as_u32);
             }
 
-            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
-                const as_u32 = try Codec(u32).std_int.decodeCopy(reader, options);
+            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
+                const as_u32 = try Codec(u32).std_int.decodeCopy(reader, options, null);
                 if (as_u32 > std.math.maxInt(enum_info.tag_type)) return error.DecodeFailed;
                 const raw: enum_info.tag_type = @intCast(as_u32);
                 // TODO: if/when https://github.com/ziglang/zig/issues/12250 is implemented, replace this `enums.fromInt` with an
@@ -441,10 +460,11 @@ pub fn Codec(comptime V: type) type {
                     reader: *std.Io.Reader,
                     options: Options,
                     value: *V,
+                    gpa_opt: ?std.mem.Allocator,
                 ) DecodeError!void {
                     switch (@typeInfo(V)) {
-                        .array => for (value) |*elem| try elem_codec.decodeInto(reader, options, elem),
-                        .vector => |vec_info| for (0..vec_info.len) |i| try elem_codec.decodeInto(reader, options, &value[i]),
+                        .array => for (value) |*elem| try elem_codec.decodeInto(reader, options, elem, gpa_opt),
+                        .vector => |vec_info| for (0..vec_info.len) |i| try elem_codec.decodeInto(reader, options, &value[i], gpa_opt),
                         else => @compileError(not_implemented_err_msg),
                     }
                 }
@@ -463,8 +483,14 @@ pub fn Codec(comptime V: type) type {
                 fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
                     try methods.encode(ctx.child.*, writer, options, value);
                 }
-                fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
-                    try methods.decode(ctx.child.*, reader, options, value);
+                fn decodeFn(
+                    ctx: Ctx,
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    value: *V,
+                    gpa_opt: ?std.mem.Allocator,
+                ) DecodeError!void {
+                    try methods.decode(ctx.child.*, reader, options, value, gpa_opt);
                 }
             };
 
@@ -482,11 +508,22 @@ pub fn Codec(comptime V: type) type {
         /// ```
         pub inline fn implementFields(fields: *const Ctx.Fields, comptime methods: type) CodecSelf {
             const erased = struct {
-                fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                fn encodeFn(
+                    ctx: Ctx,
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
                     try methods.encode(ctx.fields.*, writer, options, value);
                 }
-                fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
-                    try methods.decode(ctx.fields.*, reader, options, value);
+                fn decodeFn(
+                    ctx: Ctx,
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    value: *V,
+                    gpa_opt: ?std.mem.Allocator,
+                ) DecodeError!void {
+                    try methods.decode(ctx.fields.*, reader, options, value, gpa_opt);
                 }
             };
 
@@ -504,13 +541,24 @@ pub fn Codec(comptime V: type) type {
         /// ```
         pub inline fn implementNull(comptime methods: type) CodecSelf {
             const erased = struct {
-                fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                fn encodeFn(
+                    ctx: Ctx,
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
                     _ = &ctx.null;
                     try methods.encode(writer, options, value);
                 }
-                fn decodeFn(ctx: Ctx, reader: *std.Io.Reader, options: Options, value: *V) DecodeError!void {
+                fn decodeFn(
+                    ctx: Ctx,
+                    reader: *std.Io.Reader,
+                    options: Options,
+                    value: *V,
+                    gpa_opt: ?std.mem.Allocator,
+                ) DecodeError!void {
                     _ = &ctx.null;
-                    try methods.decode(reader, options, value);
+                    try methods.decode(reader, options, value, gpa_opt);
                 }
             };
 
@@ -528,7 +576,7 @@ test "std_void" {
     var null_writer: std.Io.Writer.Discarding = .init(&.{});
     const void_codec: Codec(void) = .std_void;
     try std.testing.expectEqual({}, void_codec.encode(&null_writer.writer, .default, &{}));
-    try std.testing.expectEqual({}, void_codec.decodeCopy(&null_reader, .default));
+    try std.testing.expectEqual({}, void_codec.decodeCopy(&null_reader, .default, null));
 }
 
 test "std_byte" {
@@ -540,10 +588,10 @@ test "std_byte" {
 
     const byte_codec: Codec(u8) = .std_byte;
 
-    try std.testing.expectEqual('f', byte_codec.decodeCopy(test_reader, .default));
-    try std.testing.expectEqual('o', byte_codec.decodeCopy(test_reader, .default));
-    try std.testing.expectEqual('o', byte_codec.decodeCopy(test_reader, .default));
-    try std.testing.expectError(error.EndOfStream, byte_codec.decodeCopy(test_reader, .default));
+    try std.testing.expectEqual('f', byte_codec.decodeCopy(test_reader, .default, null));
+    try std.testing.expectEqual('o', byte_codec.decodeCopy(test_reader, .default, null));
+    try std.testing.expectEqual('o', byte_codec.decodeCopy(test_reader, .default, null));
+    try std.testing.expectError(error.EndOfStream, byte_codec.decodeCopy(test_reader, .default, null));
 }
 
 test "std_bool" {
@@ -555,10 +603,10 @@ test "std_bool" {
 
     const bool_codec: Codec(bool) = .std_bool;
 
-    try std.testing.expectEqual(false, bool_codec.decodeCopy(test_reader, .default));
-    try std.testing.expectEqual(true, bool_codec.decodeCopy(test_reader, .default));
-    try std.testing.expectError(error.DecodeFailed, bool_codec.decodeCopy(test_reader, .default));
-    try std.testing.expectError(error.EndOfStream, bool_codec.decodeCopy(test_reader, .default));
+    try std.testing.expectEqual(false, bool_codec.decodeCopy(test_reader, .default, null));
+    try std.testing.expectEqual(true, bool_codec.decodeCopy(test_reader, .default, null));
+    try std.testing.expectError(error.DecodeFailed, bool_codec.decodeCopy(test_reader, .default, null));
+    try std.testing.expectError(error.EndOfStream, bool_codec.decodeCopy(test_reader, .default, null));
 }
 
 test "std_int" {
@@ -768,8 +816,12 @@ fn testCodecRoundTrips(
         }
 
         var encoded_reader: std.Io.Reader = .fixed(buffer.items);
-        for (values) |expected_int| {
-            try std.testing.expectEqualDeep(expected_int, codec.decodeCopy(&encoded_reader, options));
+        for (values) |expected| {
+            try std.testing.expectEqualDeep(expected, codec.decodeCopy(
+                &encoded_reader,
+                options,
+                std.testing.allocator,
+            ));
         }
         try std.testing.expectEqual(0, encoded_reader.bufferedLen());
     }
