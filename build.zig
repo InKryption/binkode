@@ -27,11 +27,13 @@ pub fn build(b: *Build) void {
     if (!is_root) return;
     const bin_opts: BinOptions = .fromBuildOptions(b);
     const filters = b.option([]const []const u8, "filter", "Filter(s) for tests.") orelse &.{};
+    const force_llvm = b.option(bool, "force-llvm", "Force usage of the llvm backend.") orelse false;
 
     const unit_test_exe = b.addTest(.{
         .name = "unit-test",
         .root_module = binkode_mod,
         .filters = filters,
+        .use_llvm = if (force_llvm) true else null,
     });
 
     const unit_test_out = addExeOutputs(b, .{
