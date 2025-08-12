@@ -50,15 +50,15 @@ pub fn Codec(comptime V: type) type {
             ctx: Ctx,
             reader: *std.Io.Reader,
             options: Options,
-            value: *V,
             gpa_opt: ?std.mem.Allocator,
+            value: *V,
         ) DecodeError!void,
 
         /// Frees any of the resources held by `value.*`.
         freeFn: ?*const fn (
             ctx: Ctx,
-            value: *const V,
             gpa_opt: ?std.mem.Allocator,
+            value: *const V,
         ) void,
         const CodecSelf = @This();
 
@@ -81,7 +81,7 @@ pub fn Codec(comptime V: type) type {
             gpa_opt: ?std.mem.Allocator,
         ) DecodeError!V {
             var value: V = undefined;
-            try self.decodeInto(reader, options, &value, gpa_opt);
+            try self.decodeInto(reader, options, gpa_opt, &value);
             return value;
         }
 
@@ -89,19 +89,19 @@ pub fn Codec(comptime V: type) type {
             self: CodecSelf,
             reader: *std.Io.Reader,
             options: Options,
-            value: *V,
             gpa_opt: ?std.mem.Allocator,
+            value: *V,
         ) DecodeError!void {
-            return self.decodeFn(self.ctx, reader, options, value, gpa_opt);
+            return self.decodeFn(self.ctx, reader, options, gpa_opt, value);
         }
 
         pub inline fn free(
             self: CodecSelf,
-            value: *const V,
             gpa_opt: ?std.mem.Allocator,
+            value: *const V,
         ) void {
             const freeFn = self.freeFn orelse return;
-            return freeFn(self.ctx, value, gpa_opt);
+            return freeFn(self.ctx, gpa_opt, value);
         }
 
         pub const Ctx = union {
@@ -171,6 +171,7 @@ pub fn Codec(comptime V: type) type {
         // -- Standard Codecs -- //
 
         /// Standard codec for a zero-sized value.
+        /// Never fails to encode or decode.
         pub const std_void: CodecSelf = .implementNull(struct {
             comptime {
                 if (@sizeOf(V) != 0) @compileError(
@@ -185,7 +186,7 @@ pub fn Codec(comptime V: type) type {
                 _ = value;
             }
 
-            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V, gpa_opt: ?std.mem.Allocator) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, options: Options, gpa_opt: ?std.mem.Allocator, value: *V) DecodeError!void {
                 _ = reader;
                 _ = options;
                 _ = value;
@@ -202,7 +203,7 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeByte(value.*);
             }
 
-            pub fn decode(reader: *std.Io.Reader, _: Options, value: *u8, _: ?std.mem.Allocator) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, _: Options, _: ?std.mem.Allocator, value: *u8) DecodeError!void {
                 value.* = try reader.takeByte();
             }
 
@@ -216,7 +217,7 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeByte(@intFromBool(value.*));
             }
 
-            pub fn decode(reader: *std.Io.Reader, _: Options, value: *bool, _: ?std.mem.Allocator) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, _: Options, _: ?std.mem.Allocator, value: *bool) DecodeError!void {
                 value.* = switch (try reader.takeByte()) {
                     0 => false,
                     1 => true,
@@ -234,7 +235,7 @@ pub fn Codec(comptime V: type) type {
                 try StdInt(V).encode(writer, options, value.*);
             }
 
-            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, options: Options, _: ?std.mem.Allocator, value: *V) DecodeError!void {
                 value.* = try StdInt(V).decode(reader, options);
             }
 
@@ -242,9 +243,9 @@ pub fn Codec(comptime V: type) type {
         });
 
         /// Standard codec for a float.
+        /// Never fails to encode or decode.
         pub const std_float: CodecSelf = .implementNull(struct {
             const AsInt = std.meta.Int(.unsigned, @bitSizeOf(V));
-
             comptime {
                 switch (V) {
                     f32, f64 => {},
@@ -257,7 +258,7 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeAll(@ptrCast(&as_int_endian));
             }
 
-            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, options: Options, _: ?std.mem.Allocator, value: *V) DecodeError!void {
                 try reader.readSliceAll(@ptrCast(value));
                 value.* = @bitCast(std.mem.nativeTo(AsInt, @bitCast(value.*), options.endian));
             }
@@ -292,7 +293,7 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeAll(encoded);
             }
 
-            pub fn decode(reader: *std.Io.Reader, _: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
+            pub fn decode(reader: *std.Io.Reader, _: Options, _: ?std.mem.Allocator, value: *V) DecodeError!void {
                 const first_byte = first_byte: {
                     var first_byte: u8 = undefined;
                     try reader.readSliceAll((&first_byte)[0..1]);
@@ -340,21 +341,21 @@ pub fn Codec(comptime V: type) type {
                     pl_codec: Codec(Ctx.Child),
                     reader: *std.Io.Reader,
                     options: Options,
-                    value: *V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *V,
                 ) DecodeError!void {
                     const is_some = try std_bool.decodeCopy(reader, options, null);
                     value.* = if (is_some) @as(Unwrapped, undefined) else null;
-                    if (is_some) try pl_codec.decodeInto(reader, options, &value.*.?, gpa_opt);
+                    if (is_some) try pl_codec.decodeInto(reader, options, gpa_opt, &value.*.?);
                 }
 
                 pub fn free(
                     pl_codec: Codec(Ctx.Child),
-                    value: *const V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *const V,
                 ) void {
                     const unwrapped = if (value.*) |*unwrapped| unwrapped else return;
-                    pl_codec.free(unwrapped, gpa_opt);
+                    pl_codec.free(gpa_opt, unwrapped);
                 }
             });
         }
@@ -380,27 +381,27 @@ pub fn Codec(comptime V: type) type {
                     fields: Ctx.Fields,
                     reader: *std.Io.Reader,
                     options: Options,
-                    value: *V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *V,
                 ) DecodeError!void {
                     inline for (s_fields, 0..) |s_field, i| {
                         errdefer inline for (s_fields[0..i]) |s_field_prev| {
                             const field_codec: Codec(s_field_prev.type) = @field(fields, s_field_prev.name);
-                            field_codec.free(&@field(value, s_field_prev.name), gpa_opt);
+                            field_codec.free(gpa_opt, &@field(value, s_field_prev.name));
                         };
                         const field_codec: Codec(s_field.type) = @field(fields, s_field.name);
-                        try field_codec.decodeInto(reader, options, &@field(value, s_field.name), gpa_opt);
+                        try field_codec.decodeInto(reader, options, gpa_opt, &@field(value, s_field.name));
                     }
                 }
 
                 pub fn free(
                     fields: Ctx.Fields,
-                    value: *const V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *const V,
                 ) void {
                     inline for (s_fields) |s_field| {
                         const field_codec: Codec(s_field.type) = @field(fields, s_field.name);
-                        field_codec.free(&@field(value, s_field.name), gpa_opt);
+                        field_codec.free(gpa_opt, &@field(value, s_field.name));
                     }
                 }
             });
@@ -434,29 +435,29 @@ pub fn Codec(comptime V: type) type {
                     pl_codecs: Ctx.Fields,
                     reader: *std.Io.Reader,
                     options: Options,
-                    value: *V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *V,
                 ) DecodeError!void {
                     switch (try tag_codec.decodeCopy(reader, options, null)) {
                         inline else => |itag| {
                             value.* = @unionInit(V, @tagName(itag), undefined);
                             const Payload = @FieldType(V, @tagName(itag));
                             const payload_codec: Codec(Payload) = @field(pl_codecs, @tagName(itag));
-                            try payload_codec.decodeInto(reader, options, &@field(value, @tagName(itag)), gpa_opt);
+                            try payload_codec.decodeInto(reader, options, gpa_opt, &@field(value, @tagName(itag)));
                         },
                     }
                 }
 
                 pub fn free(
                     pl_codecs: Ctx.Fields,
-                    value: *const V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *const V,
                 ) void {
                     switch (value.*) {
                         inline else => |*payload, itag| {
                             const Payload = @TypeOf(payload.*);
                             const field_codec: Codec(Payload) = @field(pl_codecs, @tagName(itag));
-                            field_codec.free(payload, gpa_opt);
+                            field_codec.free(gpa_opt, payload);
                         },
                     }
                 }
@@ -487,7 +488,12 @@ pub fn Codec(comptime V: type) type {
                 return Codec(u32).std_int.encode(writer, options, &as_u32);
             }
 
-            pub fn decode(reader: *std.Io.Reader, options: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
+            pub fn decode(
+                reader: *std.Io.Reader,
+                options: Options,
+                _: ?std.mem.Allocator,
+                value: *V,
+            ) DecodeError!void {
                 const as_u32 = try Codec(u32).std_int.decodeCopy(reader, options, null);
                 if (as_u32 > std.math.maxInt(enum_info.tag_type)) return error.DecodeFailed;
                 const raw: enum_info.tag_type = @intCast(as_u32);
@@ -508,7 +514,7 @@ pub fn Codec(comptime V: type) type {
             pub const free = {};
         });
 
-        /// Standard codec for a byte array. Writes no length.
+        /// Standard codec for a byte array. Encodes no length.
         /// Optimization over `stdArray(&.std_byte)`.
         ///
         /// Failure to decode indicates the stream ended before filling the array.
@@ -517,7 +523,12 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeAll(value);
             }
 
-            pub fn decode(reader: *std.Io.Reader, _: Options, value: *V, _: ?std.mem.Allocator) DecodeError!void {
+            pub fn decode(
+                reader: *std.Io.Reader,
+                _: Options,
+                _: ?std.mem.Allocator,
+                value: *V,
+            ) DecodeError!void {
                 reader.readSliceAll(value) catch |err| switch (err) {
                     error.ReadFailed => |e| return e,
                     error.EndOfStream => return error.DecodeFailed,
@@ -527,7 +538,7 @@ pub fn Codec(comptime V: type) type {
             pub const free = {};
         });
 
-        /// Standard codec for an array. Writes no length.
+        /// Standard codec for an array. Encodes no length.
         /// Also see `std_byte_array`.
         pub inline fn stdArray(element_codec: *const Codec(Ctx.Child)) CodecSelf {
             return .implementChild(element_codec, struct {
@@ -550,25 +561,25 @@ pub fn Codec(comptime V: type) type {
                     elem_codec: Codec(Ctx.Child),
                     reader: *std.Io.Reader,
                     options: Options,
-                    value: *V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *V,
                 ) DecodeError!void {
                     switch (@typeInfo(V)) {
-                        .array => for (value) |*elem| try elem_codec.decodeInto(reader, options, elem, gpa_opt),
-                        .vector => |vec_info| for (0..vec_info.len) |i| try elem_codec.decodeInto(reader, options, &value[i], gpa_opt),
+                        .array => for (value) |*elem| try elem_codec.decodeInto(reader, options, gpa_opt, elem),
+                        .vector => |vec_info| for (0..vec_info.len) |i| try elem_codec.decodeInto(reader, options, gpa_opt, &value[i]),
                         else => @compileError(not_implemented_err_msg),
                     }
                 }
 
                 pub fn free(
                     elem_codec: Codec(Ctx.Child),
-                    value: *const V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *const V,
                 ) void {
                     if (elem_codec.freeFn == null) return;
                     switch (@typeInfo(V)) {
-                        .array => for (value) |*elem| elem_codec.free(elem, gpa_opt),
-                        .vector => |vec_info| for (0..vec_info.len) |i| elem_codec.free(&value[i], gpa_opt),
+                        .array => for (value) |*elem| elem_codec.free(gpa_opt, elem),
+                        .vector => |vec_info| for (0..vec_info.len) |i| elem_codec.free(gpa_opt, &value[i]),
                         else => @compileError(not_implemented_err_msg),
                     }
                 }
@@ -576,7 +587,7 @@ pub fn Codec(comptime V: type) type {
         }
 
         /// Standard codec for a single item pointer.
-        /// Allocates the result.
+        /// Decoding allocates the result.
         pub inline fn stdSingleItemPtr(child: *const Codec(Ctx.Child)) CodecSelf {
             return .implementChild(child, struct {
                 const ptr_info = @typeInfo(V).pointer;
@@ -599,8 +610,8 @@ pub fn Codec(comptime V: type) type {
                     elem_codec: Codec(Ctx.Child),
                     reader: *std.Io.Reader,
                     options: Options,
-                    value: *V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *V,
                 ) DecodeError!void {
                     const gpa = gpa_opt.?;
                     const aligned_bytes = try gpa.alignedAlloc(
@@ -613,17 +624,17 @@ pub fn Codec(comptime V: type) type {
                         ptr_info.child,
                         aligned_bytes[0..@sizeOf(ptr_info.child)],
                     );
-                    try elem_codec.decodeInto(reader, options, ptr, gpa_opt);
+                    try elem_codec.decodeInto(reader, options, gpa, ptr);
                     value.* = ptr;
                 }
 
                 pub fn free(
                     elem_codec: Codec(Ctx.Child),
-                    value: *const V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *const V,
                 ) void {
                     const gpa = gpa_opt.?;
-                    elem_codec.free(value.*, gpa_opt);
+                    elem_codec.free(gpa, value.*);
                     gpa.destroy(value.*);
                 }
             });
@@ -638,21 +649,26 @@ pub fn Codec(comptime V: type) type {
         /// ```
         pub inline fn implementChild(child: *const Codec(Ctx.Child), comptime methods: type) CodecSelf {
             const erased = struct {
-                fn encodeFn(ctx: Ctx, writer: *std.Io.Writer, options: Options, value: *const V) EncodeError!void {
+                fn encodeFn(
+                    ctx: Ctx,
+                    writer: *std.Io.Writer,
+                    options: Options,
+                    value: *const V,
+                ) EncodeError!void {
                     try methods.encode(ctx.child.*, writer, options, value);
                 }
                 fn decodeFn(
                     ctx: Ctx,
                     reader: *std.Io.Reader,
                     options: Options,
-                    value: *V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *V,
                 ) DecodeError!void {
-                    try methods.decode(ctx.child.*, reader, options, value, gpa_opt);
+                    try methods.decode(ctx.child.*, reader, options, gpa_opt, value);
                 }
 
-                fn freeFn(ctx: Ctx, value: *const V, gpa_opt: ?std.mem.Allocator) void {
-                    methods.free(ctx.child.*, value, gpa_opt);
+                fn freeFn(ctx: Ctx, gpa_opt: ?std.mem.Allocator, value: *const V) void {
+                    methods.free(ctx.child.*, gpa_opt, value);
                 }
             };
 
@@ -683,14 +699,14 @@ pub fn Codec(comptime V: type) type {
                     ctx: Ctx,
                     reader: *std.Io.Reader,
                     options: Options,
-                    value: *V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *V,
                 ) DecodeError!void {
-                    try methods.decode(ctx.fields.*, reader, options, value, gpa_opt);
+                    try methods.decode(ctx.fields.*, reader, options, gpa_opt, value);
                 }
 
-                fn freeFn(ctx: Ctx, value: *const V, gpa_opt: ?std.mem.Allocator) void {
-                    methods.free(ctx.fields.*, value, gpa_opt);
+                fn freeFn(ctx: Ctx, gpa_opt: ?std.mem.Allocator, value: *const V) void {
+                    methods.free(ctx.fields.*, gpa_opt, value);
                 }
             };
 
@@ -722,16 +738,16 @@ pub fn Codec(comptime V: type) type {
                     ctx: Ctx,
                     reader: *std.Io.Reader,
                     options: Options,
-                    value: *V,
                     gpa_opt: ?std.mem.Allocator,
+                    value: *V,
                 ) DecodeError!void {
                     _ = &ctx.null;
-                    try methods.decode(reader, options, value, gpa_opt);
+                    try methods.decode(reader, options, gpa_opt, value);
                 }
 
-                fn freeFn(ctx: Ctx, value: *const V, gpa_opt: ?std.mem.Allocator) void {
+                fn freeFn(ctx: Ctx, gpa_opt: ?std.mem.Allocator, value: *const V) void {
                     _ = &ctx.null;
-                    methods.free(value, gpa_opt);
+                    methods.free(gpa_opt, value);
                 }
             };
 
@@ -1006,8 +1022,8 @@ fn testCodecRoundTrips(
                 options,
                 std.testing.allocator,
             );
-            defer if (actual) |unwrapped| {
-                codec.free(&unwrapped, std.testing.allocator);
+            defer if (actual) |*unwrapped| {
+                codec.free(std.testing.allocator, unwrapped);
             } else |_| {};
             try std.testing.expectEqualDeep(expected, actual);
         }
