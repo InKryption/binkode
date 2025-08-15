@@ -66,7 +66,7 @@ pub fn Codec(comptime V: type) type {
             ///
             /// If this is null, the `decodeInit` method is a noop, and the implementation
             /// must assume `value.*` is undefined when `value` is passed to any in-place
-            /// decode methods.
+            /// decode methods, and if it were passed to `free`.
             decodeInitFn: ?*const fn (
                 ctx: ?*const anyopaque,
                 /// Should be assumed to be undefined by the implementation, which should set
@@ -86,6 +86,7 @@ pub fn Codec(comptime V: type) type {
             ) DecodeReaderError!void,
 
             /// Frees any of the resources held by `value.*`.
+            /// Assumes `value.*` is in a valid state as defined by the implementation.
             /// If this is null, the `free` method is a noop.
             freeFn: ?*const fn (
                 ctx: ?*const anyopaque,
@@ -178,6 +179,7 @@ pub fn Codec(comptime V: type) type {
         ) DecodeReaderError!V {
             var value: V = undefined;
             self.decodeInit(&value);
+            errdefer self.free(gpa_opt, &value);
             try self.decodeInto(reader, config, gpa_opt, &value);
             return value;
         }
@@ -194,8 +196,8 @@ pub fn Codec(comptime V: type) type {
         ) (DecodeSliceError || error{Overlong})!V {
             var value: V = undefined;
             self.decodeInit(&value);
-            const len = try self.decodeSliceInto(src, config, gpa_opt, &value);
             errdefer self.free(gpa_opt, &value);
+            const len = try self.decodeSliceInto(src, config, gpa_opt, &value);
             std.debug.assert(len <= src.len);
             if (len != src.len) return error.Overlong;
             return value;
@@ -211,8 +213,8 @@ pub fn Codec(comptime V: type) type {
         ) DecodeSliceError!V {
             var value: V = undefined;
             self.decodeInit(&value);
-            const len = try self.decodeSliceInto(src, config, gpa_opt, &value);
             errdefer self.free(gpa_opt, &value);
+            const len = try self.decodeSliceInto(src, config, gpa_opt, &value);
             std.debug.assert(len <= src.len);
             return value;
         }
@@ -230,9 +232,26 @@ pub fn Codec(comptime V: type) type {
             return decodeInitFn(self.ctx, value);
         }
 
+        /// Decodes into `value.*` from the `reader` stream.
+        /// If the codec requires allocation, `gpa_opt` must be non-null.
+        /// Caller is responsible for freeing any resources held by `value.*`,
+        /// including in event of failure.
+        pub inline fn decodeInto(
+            self: CodecSelf,
+            reader: *std.Io.Reader,
+            config: Config,
+            gpa_opt: ?std.mem.Allocator,
+            /// See doc comment on `decodeInit` for commentary on the expected initial state of `value.*`.
+            value: *V,
+        ) DecodeReaderError!void {
+            return self.vtable.decodeFn(self.ctx, reader, config, gpa_opt, value);
+        }
+
         /// Same as `decodeInto`, but takes a slice directly as input.
         /// Returns the number of bytes in `src` which were consumed to decode into `value.*`.
         /// If the codec requires allocation, `gpa_opt` must be non-null.
+        /// Caller is responsible for freeing any resources held by `value.*`,
+        /// including in event of failure.
         pub inline fn decodeSliceInto(
             self: CodecSelf,
             src: []const u8,
@@ -249,19 +268,6 @@ pub fn Codec(comptime V: type) type {
                 error.ReadFailed => unreachable, // fixed-buffer reader cannot fail, it only returns error.EndOfStream.
             };
             return reader.seek;
-        }
-
-        /// Decodes into `value.*` from the `reader` stream.
-        /// If the codec requires allocation, `gpa_opt` must be non-null.
-        pub inline fn decodeInto(
-            self: CodecSelf,
-            reader: *std.Io.Reader,
-            config: Config,
-            gpa_opt: ?std.mem.Allocator,
-            /// See doc comment on `decodeInit` for commentary on the expected initial state of `value.*`.
-            value: *V,
-        ) DecodeReaderError!void {
-            return self.vtable.decodeFn(self.ctx, reader, config, gpa_opt, value);
         }
 
         /// Frees any of the resources held by `value.*`.
@@ -449,6 +455,7 @@ pub fn Codec(comptime V: type) type {
         });
 
         /// Standard codec for an optional.
+        /// Allocation requirement defined by payload codec.
         /// Never fails to encode the null bool, payload fallability is defined by payload codec.
         /// Failure to decode indicates either a failure to decode the boolean, or the potential
         /// payload.
@@ -515,6 +522,7 @@ pub fn Codec(comptime V: type) type {
         }
 
         /// Standard codec for a struct.
+        /// Allocation requirement defined by whether any codec in field codecs requires allocation.
         pub inline fn stdStruct(field_codecs: *const Fields) CodecSelf {
             return .implementCtx(field_codecs, struct {
                 const s_fields = @typeInfo(V).@"struct".fields;
@@ -564,6 +572,7 @@ pub fn Codec(comptime V: type) type {
         }
 
         /// Standard codec for a tagged union, aka "enums" in the
+        /// Allocation requirement defined by whether any codec in payload codecs requires allocation.
         /// bincode specification, written in the context of rust.
         /// Also see: `std_discriminant`.
         pub inline fn stdUnion(payload_codecs: *const Fields) CodecSelf {
@@ -700,6 +709,7 @@ pub fn Codec(comptime V: type) type {
         });
 
         /// Standard codec for an array. Encodes no length.
+        /// Allocation requirement defined by element codec.
         /// Also see `std_byte_array`.
         pub inline fn stdArray(element_codec: *const Codec(Element)) CodecSelf {
             return .implementCtx(element_codec, struct {
@@ -749,9 +759,15 @@ pub fn Codec(comptime V: type) type {
             });
         }
 
-        /// Standard codec for a byte slice. Encodes the length.
-        /// Optimization over `stdSlice(&.std_byte)`.
-        /// Decoding allocates the result.
+        /// Standard codec for a byte slice. Encodes the length. Optimization over `stdSlice(&.std_byte)`.
+        /// Requires allocation.
+        ///
+        /// Decode's initial state is `&.{}`. If it is non-empty, it must have been allocated using
+        /// the supplied `gpa_opt.?`; it will be resized to the decoded length if necessary, and the
+        /// contents will be overwritten with the contents read from the stream - the pointed-to bytes
+        /// are assumed to be write-only during the duration of the function.
+        /// Allocation failure while doing so may result in destruction of the original allocation,
+        /// setting it to empty.
         pub const std_byte_slice: CodecSelf = .implementNull(struct {
             const ptr_info = @typeInfo(V).pointer;
             comptime {
@@ -765,7 +781,9 @@ pub fn Codec(comptime V: type) type {
                 try writer.writeAll(value.*);
             }
 
-            pub const decodeInit = {};
+            pub fn decodeInit(value: *V) void {
+                value.* = &.{};
+            }
 
             pub fn decode(
                 reader: *std.Io.Reader,
@@ -776,11 +794,22 @@ pub fn Codec(comptime V: type) type {
                 const gpa = gpa_opt.?;
 
                 const len = try Codec(usize).std_int.decode(reader, config, null);
-                const slice = try gpa.alignedAlloc(u8, .fromByteUnits(ptr_info.alignment), len);
-                errdefer gpa.free(slice);
+                if (value.len != len) blk: {
+                    const old_slice_mut = @constCast(value.*); // assumes this is allocated data, which must be mutable.
+                    if (gpa.resize(old_slice_mut, len)) {
+                        value.len = len;
+                        break :blk;
+                    }
+                    if (gpa.remap(old_slice_mut, len)) |new_slice| {
+                        value.* = new_slice;
+                        break :blk;
+                    }
+                    gpa.free(value.*);
+                    value.* = &.{};
+                    value.* = try gpa.alignedAlloc(u8, .fromByteUnits(ptr_info.alignment), len);
+                }
 
-                try reader.readSliceAll(slice);
-                value.* = slice;
+                try reader.readSliceAll(@constCast(value.*)); // assumes this is allocated data, which must be mutable.
             }
 
             pub fn free(gpa_opt: ?std.mem.Allocator, value: *const V) void {
@@ -790,8 +819,8 @@ pub fn Codec(comptime V: type) type {
         });
 
         /// Standard codec for a slice. Encodes the length.
+        /// Requires allocation, for the slice, and possibly for the elements (based on element codec).
         /// Also see `std_byte_array`.
-        /// Decoding allocates the result.
         pub inline fn stdSlice(element_codec: *const Codec(Element)) CodecSelf {
             return .implementCtx(element_codec, struct {
                 const ptr_info = @typeInfo(V).pointer;
@@ -849,9 +878,8 @@ pub fn Codec(comptime V: type) type {
             });
         }
 
-        /// Standard codec for a byte array pointer. Encodes the length.
-        /// Optimization over `stdArrayPtr(&.std_byte)`.
-        /// Decoding allocates the result.
+        /// Standard codec for a byte array pointer. Encodes the length. Optimization over `stdArrayPtr(&.std_byte)`.
+        /// Requires allocation.
         pub const std_byte_array_ptr: CodecSelf = .implementNull(struct {
             const ptr_info = @typeInfo(V).pointer;
             comptime {
@@ -1448,6 +1476,24 @@ test "decodeSliceIgnoreLength" {
         250,
         Codec(u32).std_int.decodeSliceIgnoreLength(&overlong_varint_src, config, null),
     );
+}
+
+test "optional slice memory re-use" {
+    const gpa = std.testing.allocator;
+
+    const codec: Codec(?[]const u8) = .stdOptional(&.std_byte_slice);
+
+    const expected: ?[]const u8 = "foo";
+    const expected_encoded_bytes = try codec.encodeAlloc(gpa, .default, &expected);
+    defer gpa.free(expected_encoded_bytes);
+
+    var actual: ?[]const u8 = try gpa.alloc(u8, 100);
+    defer if (actual) |res| gpa.free(res);
+    try std.testing.expectEqual(
+        expected_encoded_bytes.len,
+        codec.decodeSliceInto(expected_encoded_bytes, .default, gpa, &actual),
+    );
+    try std.testing.expectEqualDeep(expected, actual);
 }
 
 fn floatTestEdgeCases(comptime F: type) [18]F {
