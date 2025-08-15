@@ -452,6 +452,9 @@ pub fn Codec(comptime V: type) type {
         /// Never fails to encode the null bool, payload fallability is defined by payload codec.
         /// Failure to decode indicates either a failure to decode the boolean, or the potential
         /// payload.
+        /// Decode's initial state is "null". If it is non-null, the existing payload must conform
+        /// to the payload codec's expectations; if the decoded value is null, the payload codec
+        /// will be used to free the existing payload.
         pub inline fn stdOptional(payload_codec: *const Codec(Child)) CodecSelf {
             return .implementCtx(payload_codec, struct {
                 const Unwrapped = @typeInfo(V).optional.child;
@@ -470,7 +473,13 @@ pub fn Codec(comptime V: type) type {
                     try pl_codec.encode(writer, config, payload);
                 }
 
-                pub const decodeInit = {};
+                pub fn decodeInit(
+                    pl_codec: Codec(Child),
+                    value: *V,
+                ) void {
+                    _ = pl_codec;
+                    value.* = null;
+                }
 
                 pub fn decode(
                     pl_codec: Codec(Child),
@@ -480,8 +489,18 @@ pub fn Codec(comptime V: type) type {
                     value: *V,
                 ) DecodeReaderError!void {
                     const is_some = try std_bool.decode(reader, config, null);
-                    value.* = if (is_some) @as(Unwrapped, undefined) else null;
-                    if (is_some) try pl_codec.decodeInto(reader, config, gpa_opt, &value.*.?);
+                    if (is_some) {
+                        if (value.* == null) {
+                            value.* = @as(Unwrapped, undefined);
+                            pl_codec.decodeInit(&value.*.?);
+                        }
+                        try pl_codec.decodeInto(reader, config, gpa_opt, &value.*.?);
+                    } else {
+                        if (value.*) |*pl| {
+                            pl_codec.free(gpa_opt, pl);
+                        }
+                        value.* = null;
+                    }
                 }
 
                 pub fn free(
