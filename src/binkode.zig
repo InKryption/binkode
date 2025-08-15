@@ -154,38 +154,6 @@ pub fn Codec(comptime V: type) type {
             return value;
         }
 
-        /// Decodes into `value.*` from the `reader` stream.
-        /// If the codec requires allocation, `gpa_opt` must be non-null.
-        pub inline fn decodeInto(
-            self: CodecSelf,
-            reader: *std.Io.Reader,
-            config: Config,
-            gpa_opt: ?std.mem.Allocator,
-            value: *V,
-        ) DecodeReaderError!void {
-            return self.decodeFn(self.ctx, reader, config, gpa_opt, value);
-        }
-
-        /// Same as `decodeInto`, but takes a slice directly as input.
-        /// Returns the number of bytes in `src` which were consumed to decode into `value.*`.
-        /// If the codec requires allocation, `gpa_opt` must be non-null.
-        pub inline fn decodeSliceInto(
-            self: CodecSelf,
-            src: []const u8,
-            config: Config,
-            gpa_opt: ?std.mem.Allocator,
-            value: *V,
-        ) DecodeSliceError!usize {
-            var reader: std.Io.Reader = .fixed(src);
-            self.decodeInto(&reader, config, gpa_opt, value) catch |err| switch (err) {
-                error.DecodeFailed => |e| return e,
-                error.OutOfMemory => |e| return e,
-                error.EndOfStream => |e| return e,
-                error.ReadFailed => unreachable, // fixed-buffer reader cannot fail, it only returns error.EndOfStream.
-            };
-            return reader.seek;
-        }
-
         /// Same as `decode`, but takes a slice directly as input.
         /// Returns `error.Overlong` if the number of bytes which were
         /// consumed to decode the value do not match `src.len`.
@@ -217,6 +185,38 @@ pub fn Codec(comptime V: type) type {
             errdefer self.free(gpa_opt, &value);
             std.debug.assert(len <= src.len);
             return value;
+        }
+
+        /// Same as `decodeInto`, but takes a slice directly as input.
+        /// Returns the number of bytes in `src` which were consumed to decode into `value.*`.
+        /// If the codec requires allocation, `gpa_opt` must be non-null.
+        pub inline fn decodeSliceInto(
+            self: CodecSelf,
+            src: []const u8,
+            config: Config,
+            gpa_opt: ?std.mem.Allocator,
+            value: *V,
+        ) DecodeSliceError!usize {
+            var reader: std.Io.Reader = .fixed(src);
+            self.decodeInto(&reader, config, gpa_opt, value) catch |err| switch (err) {
+                error.DecodeFailed => |e| return e,
+                error.OutOfMemory => |e| return e,
+                error.EndOfStream => |e| return e,
+                error.ReadFailed => unreachable, // fixed-buffer reader cannot fail, it only returns error.EndOfStream.
+            };
+            return reader.seek;
+        }
+
+        /// Decodes into `value.*` from the `reader` stream.
+        /// If the codec requires allocation, `gpa_opt` must be non-null.
+        pub inline fn decodeInto(
+            self: CodecSelf,
+            reader: *std.Io.Reader,
+            config: Config,
+            gpa_opt: ?std.mem.Allocator,
+            value: *V,
+        ) DecodeReaderError!void {
+            return self.decodeFn(self.ctx, reader, config, gpa_opt, value);
         }
 
         /// Frees any of the resources held by `value.*`.
@@ -470,7 +470,8 @@ pub fn Codec(comptime V: type) type {
             });
         }
 
-        /// Standard codec for a tagged union, aka "enums" in the bincode specification, written in the context of rust.
+        /// Standard codec for a tagged union, aka "enums" in the
+        /// bincode specification, written in the context of rust.
         /// Also see: `std_discriminant`.
         pub inline fn stdUnion(payload_codecs: *const Fields) CodecSelf {
             return .implementCtx(payload_codecs, struct {
@@ -527,7 +528,8 @@ pub fn Codec(comptime V: type) type {
             });
         }
 
-        /// Standard codec for an enum used as a discriminant, aka the tag of a tagged union, aka the tag of a rust enum.
+        /// Standard codec for an enum used as a discriminant,
+        /// aka the tag of a tagged union, aka the tag of a rust enum.
         /// Failure to decode indicates the value overflowed or didn't match a valid value.
         pub const std_discriminant: CodecSelf = .implementNull(struct {
             const enum_info = @typeInfo(V).@"enum";
