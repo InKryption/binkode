@@ -1196,6 +1196,114 @@ pub fn Codec(comptime V: type) type {
             });
         }
 
+        const ArrayListElem = switch (@typeInfo(V)) {
+            .@"struct" => blk: {
+                if (!@hasDecl(V, "Slice")) break :blk noreturn;
+                if (@TypeOf(&V.Slice) != *const type) break :blk noreturn;
+                const ptr_info = switch (@typeInfo(V.Slice)) {
+                    .pointer => |ptr_info| ptr_info,
+                    else => break :blk noreturn,
+                };
+                if (ptr_info.size != .slice) break :blk noreturn;
+                const Expected = std.ArrayListAlignedUnmanaged(ptr_info.child, .fromByteUnits(ptr_info.alignment));
+                if (V != Expected) break :blk noreturn;
+                break :blk ptr_info.child;
+            },
+            else => noreturn,
+        };
+
+        /// Standard codec for an arraylist. Encodes the length.
+        /// Requires allocation, for the arraylist, and possibly for the elements (based on element codec).
+        ///
+        /// Decode's initial state is `.empty`. If it is non-empty, it must have been allocated using
+        /// the supplied `gpa_opt.?`; it will be resized to the decoded length if necessary, freeing
+        /// the discarded elements or initializing added elements using `element_codec`, and decoding into
+        /// the existing elements, which must be in a valid initial state conforming to `element_codec`'s
+        /// documented expectations.
+        /// Allocation failure while doing so may result in destruction of the original allocation,
+        /// setting it to empty.
+        pub fn stdArrayList(element_codec: Codec(ArrayListElem)) CodecSelf {
+            const alignment: std.mem.Alignment =
+                .fromByteUnits(@typeInfo(V.Slice).pointer.alignment);
+            const ArrayListType = std.ArrayListAlignedUnmanaged(ArrayListElem, alignment);
+
+            const erased = ImplementCtxErasedMethods(struct {
+                pub fn encode(
+                    elem_codec: Codec(ArrayListElem),
+                    writer: *std.Io.Writer,
+                    config: Config,
+                    value: *const ArrayListType,
+                ) EncodeWriterError!void {
+                    const std_slice_codec: Codec(ArrayListType.Slice) = .stdSlice(elem_codec);
+                    try std_slice_codec.encode(writer, config, &value.items);
+                }
+
+                pub fn decodeInit(
+                    elem_codec: Codec(ArrayListElem),
+                    gpa_opt: ?std.mem.Allocator,
+                    values: []ArrayListType,
+                ) std.mem.Allocator.Error!void {
+                    _ = elem_codec;
+                    _ = gpa_opt.?;
+                    @memset(values, .empty);
+                }
+
+                pub fn decode(
+                    elem_codec: Codec(ArrayListElem),
+                    reader: *std.Io.Reader,
+                    config: Config,
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *ArrayListType,
+                ) DecodeReaderError!void {
+                    const gpa = gpa_opt.?;
+
+                    const len = try Codec(usize).std_int.decode(reader, config, null);
+                    try value.ensureTotalCapacityPrecise(gpa, len);
+
+                    if (len > value.items.len) {
+                        const additional = value.addManyAsSliceAssumeCapacity(len - value.items.len);
+                        elem_codec.decodeInitMany(gpa, additional) catch |err| {
+                            value.shrinkRetainingCapacity(len - additional.len);
+                            return err;
+                        };
+                    } else if (len < value.items.len) {
+                        for (value.items[len..]) |*elem| {
+                            elem_codec.free(gpa, elem);
+                        }
+                        value.shrinkRetainingCapacity(len);
+                    }
+                    std.debug.assert(value.items.len == len);
+
+                    for (value.items) |*elem| {
+                        try elem_codec.decodeInto(reader, config, gpa, elem);
+                    }
+                }
+
+                pub fn free(
+                    elem_codec: Codec(ArrayListElem),
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *const ArrayListType,
+                ) void {
+                    const gpa = gpa_opt.?;
+                    if (elem_codec.vtable.freeFn != null) {
+                        for (value.items) |*elem| elem_codec.free(gpa, elem);
+                    }
+                    var copy = value.*;
+                    copy.deinit(gpa);
+                }
+            });
+
+            return .{
+                .ctx = .init(element_codec),
+                .vtable = &.{
+                    .encodeFn = erased.encodeFn,
+                    .decodeInitFn = erased.decodeInitFn,
+                    .decodeFn = erased.decodeFn,
+                    .freeFn = erased.freeFn,
+                },
+            };
+        }
+
         /// The `Child` of `V`. Corresponds to `Child` in all of the following,
         /// and all permutations of their cv-qualified forms: `?C`, `*C`.
         /// NOTE: if `Element != noreturn`, this may be one of: `[n]Element`, `@Vector(n, Element)`.
@@ -1271,7 +1379,7 @@ pub fn Codec(comptime V: type) type {
             const erased = ImplementCtxErasedMethods(methods);
             return .{
                 .ctx = .init(ctx),
-                .vtable = comptime &.{
+                .vtable = &.{
                     .encodeFn = erased.encodeFn,
                     .decodeInitFn = if (@TypeOf(methods.decodeInit) != @TypeOf(null)) erased.decodeInitFn else null,
                     .decodeFn = erased.decodeFn,
@@ -1328,7 +1436,7 @@ pub fn Codec(comptime V: type) type {
             const erased = ImplementNullErasedMethods(methods);
             return .{
                 .ctx = null,
-                .vtable = comptime &.{
+                .vtable = &.{
                     .encodeFn = erased.encodeFn,
                     .decodeInitFn = if (@TypeOf(methods.decodeInit) != @TypeOf(null)) erased.decodeInitFn else null,
                     .decodeFn = erased.decodeFn,
@@ -1615,6 +1723,45 @@ test "stdSingleItemPtr" {
     try testCodecRoundTrips(*const u32, .stdSingleItemPtr(.std_int), &.{
         &0, &1, &2, &10000, &std.math.maxInt(u32),
     });
+}
+
+test "stdArrayList" {
+    const gpa = std.testing.allocator;
+
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try testCodecRoundTrips(std.ArrayListUnmanaged(u32), .stdArrayList(.std_int), &.{
+        .empty,
+        .fromOwnedSlice(try arena.dupe(u32, &.{ 1, 2, 3 })),
+        .fromOwnedSlice(try arena.dupe(u32, &intTestEdgeCases(u32))),
+    });
+    try testEncodedBytesAndRoundTrip(
+        std.ArrayListUnmanaged(u16),
+        .stdArrayList(.std_int),
+        .{ .endian = .little, .int = .varint },
+        .fromOwnedSlice(try arena.dupe(u16, &.{ 0, 1, 250, 251 })),
+        &[_]u8{4} ++ .{0} ++ .{1} ++ .{250} ++ .{ 251, 251, 0 },
+    );
+
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer list.deinit(gpa);
+    defer for (list.items) |str| gpa.free(str);
+    try list.ensureTotalCapacityPrecise(gpa, 4);
+    const original = try gpa.dupe(u8, "foo");
+    list.appendAssumeCapacity(original);
+    list.appendAssumeCapacity(try gpa.dupe(u8, "bar"));
+    list.appendAssumeCapacity(try gpa.dupe(u8, "baz"));
+    list.appendAssumeCapacity(try gpa.dupe(u8, "boo"));
+
+    const str_array_list_codec: Codec(std.ArrayListUnmanaged([]const u8)) = .stdArrayList(.std_byte_slice);
+    _ = try str_array_list_codec.decodeSliceInto(
+        .{2} ++ .{4} ++ "fizz" ++ .{4} ++ "buzz",
+        .{ .endian = .little, .int = .varint },
+        gpa,
+        &list,
+    );
+    try std.testing.expectEqualDeep(&[_][]const u8{ "fizz", "buzz" }, list.items);
 }
 
 test "decodeSliceIgnoreLength" {
