@@ -1,7 +1,6 @@
 const std = @import("std");
 
 pub const varint = @import("varint.zig");
-pub const StdInt = @import("stdint.zig").StdInt;
 
 pub const IntEncoding = enum {
     varint,
@@ -414,19 +413,79 @@ pub fn Codec(comptime V: type) type {
             pub const free = null;
         });
 
-        /// Standard codec for an integer.
+        /// Standard codec for an integer. Encodes `usize` and `isize` as `u64` and `i64`, respectively.
         /// Never fails to encode.
         /// Failure to decode indicates that the value overflowed.
         /// Decode's initial state is write-only.
         pub const std_int: CodecSelf = .implement(null, struct {
+            const signedness = @typeInfo(V).int.signedness;
+            const Int = blk: {
+                switch (V) {
+                    usize => break :blk u64,
+                    isize => break :blk i64,
+                    else => {},
+                }
+
+                const encoded_bits = switch (@typeInfo(V).int.bits) {
+                    0 => @compileError("This codec does not support zero-sized types."),
+                    (0 + 1)...8 => @compileError("This codec does not support byte-sized types."),
+                    (8 + 1)...16 => 16,
+                    (16 + 1)...32 => 32,
+                    (32 + 1)...64 => 64,
+                    (64 + 1)...128 => 128,
+                    (128 + 1)...256 => 256,
+                    else => @compileError("This codec does not support integers of type " ++ @typeName(V)),
+                };
+
+                break :blk std.meta.Int(signedness, encoded_bits);
+            };
+
             pub fn encode(writer: *std.Io.Writer, config: Config, value: *const V) EncodeWriterError!void {
-                try StdInt(V).encode(writer, config, value.*);
+                switch (config.int) {
+                    .fixint => {
+                        try writer.writeInt(V, value.*, config.endian);
+                    },
+                    .varint => {
+                        const unsigned_int = switch (signedness) {
+                            .signed => varint.zigzag.signedToUnsigned(Int, value.*),
+                            .unsigned => value.*,
+                        };
+                        var buffer: [varint.IntKind.fullEncodedLen(.maximum)]u8 = undefined;
+                        const int_kind = varint.encode(unsigned_int, &buffer, config.endian);
+                        try writer.writeAll(buffer[0..int_kind.fullEncodedLen()]);
+                    },
+                }
             }
 
             pub const decodeInit = null;
 
             pub fn decode(reader: *std.Io.Reader, config: Config, _: ?std.mem.Allocator, value: *V) DecodeReaderError!void {
-                value.* = try StdInt(V).decode(reader, config);
+                switch (config.int) {
+                    .fixint => {
+                        var int_bytes: [@sizeOf(Int)]u8 = undefined;
+                        try reader.readSliceAll(&int_bytes);
+                        const int = std.mem.readInt(Int, &int_bytes, config.endian);
+                        if (int > std.math.maxInt(V)) return error.DecodeFailed;
+                        value.* = @intCast(int);
+                    },
+                    .varint => {
+                        const raw_int = try varint.decodeReader(reader, config.endian);
+                        switch (signedness) {
+                            .signed => {
+                                const EncodedInt = varint.zigzag.SignedAsUnsigned(Int);
+                                if (raw_int > std.math.maxInt(EncodedInt)) return error.DecodeFailed;
+                                const encoded_int: EncodedInt = @intCast(raw_int);
+                                const int: Int = varint.zigzag.signedFromUnsigned(Int, encoded_int);
+                                if (int > std.math.maxInt(V)) return error.DecodeFailed;
+                                value.* = @intCast(int);
+                            },
+                            .unsigned => {
+                                if (raw_int > std.math.maxInt(V)) return error.DecodeFailed;
+                                value.* = @intCast(raw_int);
+                            },
+                        }
+                    },
+                }
             }
 
             pub const free = null;
