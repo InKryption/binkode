@@ -749,7 +749,7 @@ pub fn Codec(comptime V: type) type {
             const erased = ImplementMethods(null, struct {
                 const tag_codec: Codec(union_info.tag_type.?) = .std_discriminant;
 
-                fn encode(
+                pub fn encode(
                     writer: *std.Io.Writer,
                     config: Config,
                     value: *const V,
@@ -765,9 +765,9 @@ pub fn Codec(comptime V: type) type {
                     }
                 }
 
-                const decodeInit = null;
+                pub const decodeInit = null;
 
-                fn decode(
+                pub fn decode(
                     reader: *std.Io.Reader,
                     config: Config,
                     gpa_opt: ?std.mem.Allocator,
@@ -785,7 +785,7 @@ pub fn Codec(comptime V: type) type {
                     }
                 }
 
-                fn free(gpa_opt: ?std.mem.Allocator, value: *const V) void {
+                pub fn free(gpa_opt: ?std.mem.Allocator, value: *const V) void {
                     switch (value.*) {
                         inline else => |*payload, itag| {
                             const Payload = @TypeOf(payload.*);
@@ -895,7 +895,7 @@ pub fn Codec(comptime V: type) type {
             const erased = ImplementMethods(null, struct {
                 const not_implemented_err_msg = "array codec not is not implemented for type " ++ @typeName(V);
 
-                fn encode(
+                pub fn encode(
                     writer: *std.Io.Writer,
                     config: Config,
                     value: *const V,
@@ -907,7 +907,7 @@ pub fn Codec(comptime V: type) type {
                     }
                 }
 
-                fn decodeInit(
+                pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
                     values: []V,
                 ) std.mem.Allocator.Error!void {
@@ -922,7 +922,7 @@ pub fn Codec(comptime V: type) type {
                     }
                 }
 
-                fn decode(
+                pub fn decode(
                     reader: *std.Io.Reader,
                     config: Config,
                     gpa_opt: ?std.mem.Allocator,
@@ -935,7 +935,7 @@ pub fn Codec(comptime V: type) type {
                     }
                 }
 
-                fn free(gpa_opt: ?std.mem.Allocator, value: *const V) void {
+                pub fn free(gpa_opt: ?std.mem.Allocator, value: *const V) void {
                     if (element_codec.freeFn == null) return;
                     switch (@typeInfo(V)) {
                         .array => for (value) |*elem| element_codec.free(gpa_opt, elem),
