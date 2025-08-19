@@ -408,9 +408,9 @@ pub fn Codec(comptime V: type) type {
         pub const StdBoolDecodeDiag = struct {
             /// Value of the actual decoded byte with an erroneous value.
             /// Only set value when `error.DecodeFailed` is returned.
-            real_byte: u8,
+            real_byte: ?u8,
 
-            pub const init: StdBoolDecodeDiag = .{ .real_byte = undefined };
+            pub const init: StdBoolDecodeDiag = .{ .real_byte = null };
         };
 
         /// Standard codec for a boolean.
