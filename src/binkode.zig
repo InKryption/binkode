@@ -751,6 +751,26 @@ pub fn Codec(comptime V: type) type {
         pub fn stdStruct(field_codecs: Fields) CodecSelf {
             const s_fields = @typeInfo(V).@"struct".fields;
             const EncodeCtx, const DecodeCtx = FieldContexts(field_codecs);
+
+            const any_decode_init, const any_free = blk: {
+                @setEvalBranchQuota(s_fields.len + 2);
+
+                var any_decode_init = false;
+                var any_free = false;
+                for (s_fields) |s_field| {
+                    const field_codec: *const Codec(s_field.type) = @field(field_codecs, s_field.name);
+
+                    // zig fmt: off
+                    any_decode_init = any_decode_init or field_codec.decodeInitFn != null;
+                    any_free        = any_free        or field_codec.freeFn       != null;
+                    // zig fmt: on
+
+                    if (any_decode_init and any_free) break;
+                }
+
+                break :blk .{ any_decode_init, any_free };
+            };
+
             const erased = ImplementMethods(EncodeCtx, DecodeCtx, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
@@ -775,6 +795,7 @@ pub fn Codec(comptime V: type) type {
                     values: []V,
                     ctx: DecodeCtx,
                 ) std.mem.Allocator.Error!void {
+                    comptime if (!any_decode_init) unreachable;
                     for (values, 0..) |*value, value_i| {
                         errdefer for (values[0..value_i]) |*prev| {
                             freeFieldSubset(s_fields.len, ctx, gpa_opt, prev);
@@ -821,6 +842,7 @@ pub fn Codec(comptime V: type) type {
                     value: *const V,
                     ctx: DecodeCtx,
                 ) void {
+                    comptime if (!any_free) unreachable;
                     freeFieldSubset(s_fields.len, gpa_opt, value, ctx);
                 }
 
@@ -842,25 +864,6 @@ pub fn Codec(comptime V: type) type {
                     }
                 }
             });
-
-            const any_decode_init, const any_free = blk: {
-                @setEvalBranchQuota(s_fields.len + 2);
-
-                var any_decode_init = false;
-                var any_free = false;
-                for (s_fields) |s_field| {
-                    const field_codec: *const Codec(s_field.type) = @field(field_codecs, s_field.name);
-
-                    // zig fmt: off
-                    any_decode_init = any_decode_init or field_codec.decodeInitFn != null;
-                    any_free        = any_free        or field_codec.freeFn       != null;
-                    // zig fmt: on
-
-                    if (any_decode_init and any_free) break;
-                }
-
-                break :blk .{ any_decode_init, any_free };
-            };
 
             return .{
                 .EncodeCtx = EncodeCtx,
