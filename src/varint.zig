@@ -140,6 +140,18 @@ pub const IntKind = enum {
     }
 };
 
+pub inline fn encodedLiteral(
+    comptime endian: std.builtin.Endian,
+    comptime value: u256,
+) *const [IntKind.fullEncodedLen(.fromValue(value))]u8 {
+    comptime {
+        var buffer: [IntKind.fullEncodedLen(.maximum)]u8 = undefined;
+        const kind = encode(value, &buffer, endian);
+        const encoded_bytes = buffer[0..kind.fullEncodedLen()].*;
+        return &encoded_bytes;
+    }
+}
+
 pub const zigzag = struct {
     pub fn SignedAsUnsigned(comptime Signed: type) type {
         const signed_info = @typeInfo(Signed).int;
