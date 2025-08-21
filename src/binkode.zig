@@ -758,12 +758,12 @@ pub fn Codec(comptime V: type) type {
         }
 
         pub fn StdStructEncodeCtx(field_codecs: Fields) type {
-            const EncodeCtx, _ = FieldContexts(field_codecs);
+            const EncodeCtx, _, _, _ = FieldContexts(field_codecs);
             return EncodeCtx;
         }
 
         pub fn StdStructDecodeCtx(field_codecs: Fields) type {
-            _, const DecodeCtx = FieldContexts(field_codecs);
+            _, const DecodeCtx, _, _ = FieldContexts(field_codecs);
             return DecodeCtx;
         }
 
@@ -771,28 +771,20 @@ pub fn Codec(comptime V: type) type {
         /// Allocation requirement defined by whether any codec in field codecs requires allocation.
         /// Failure to encode and decode defined by all of the field codecs in sequence.
         /// Decode's initial state is defined for each field based on the respective codec.
+        ///
+        /// Also see:
+        /// * `StdStructEncodeCtx`.
+        /// * `StdStructDecodeCtx`.
         pub fn stdStruct(field_codecs: Fields) CodecSelf {
             const s_fields = @typeInfo(V).@"struct".fields;
-            const EncodeCtx, const DecodeCtx = FieldContexts(field_codecs);
+            const EncodeCtx, //
+            const DecodeCtx, //
+            const decode_init_req, //
+            const free_req //
+            = FieldContexts(field_codecs);
 
-            const any_decode_init, const any_free = blk: {
-                @setEvalBranchQuota(s_fields.len + 2);
-
-                var any_decode_init = false;
-                var any_free = false;
-                for (s_fields) |s_field| {
-                    const field_codec: *const Codec(s_field.type) = @field(field_codecs, s_field.name);
-
-                    // zig fmt: off
-                    any_decode_init = any_decode_init or field_codec.decodeInitFn != null;
-                    any_free        = any_free        or field_codec.freeFn       != null;
-                    // zig fmt: on
-
-                    if (any_decode_init and any_free) break;
-                }
-
-                break :blk .{ any_decode_init, any_free };
-            };
+            const any_decode_init = decode_init_req == .need_decode_init;
+            const any_free = free_req == .need_free;
 
             const erased = ImplementMethods(EncodeCtx, DecodeCtx, struct {
                 pub fn encode(
@@ -803,11 +795,7 @@ pub fn Codec(comptime V: type) type {
                 ) EncodeWriterError!void {
                     inline for (s_fields) |s_field| {
                         const field_codec: *const Codec(s_field.type) = @field(field_codecs, s_field.name);
-                        const field_ctx = if (EncodeCtx != void) blk: {
-                            const pl_ctx = if (@typeInfo(EncodeCtx) != .optional) ctx else ctx orelse
-                                break :blk if (field_codec.EncodeCtx != void) null;
-                            break :blk @field(pl_ctx, s_field.name);
-                        };
+                        const field_ctx = getFieldCtx(ctx, s_field.name, field_codec.EncodeCtx);
                         const field_ptr = &@field(value, s_field.name);
                         try field_codec.encode(writer, config, field_ptr, field_ctx);
                     }
@@ -827,11 +815,7 @@ pub fn Codec(comptime V: type) type {
                         inline for (s_fields, 0..) |s_field, s_field_i| {
                             errdefer freeFieldSubset(s_field_i, ctx, gpa_opt, value);
                             const field_codec: Codec(s_field.type) = @field(field_codecs, s_field.name);
-                            const field_ctx = if (DecodeCtx != void) blk: {
-                                const pl_ctx = if (@typeInfo(DecodeCtx) != .optional) ctx else ctx orelse
-                                    break :blk if (field_codec.DecodeCtx != void) null;
-                                break :blk @field(pl_ctx, s_field.name);
-                            };
+                            const field_ctx = getFieldCtx(ctx, s_field.name);
                             const field_ptr = &@field(value, s_field.name);
                             try field_codec.decodeInitOne(field_ctx, gpa_opt, field_ptr);
                         }
@@ -848,13 +832,7 @@ pub fn Codec(comptime V: type) type {
                     inline for (s_fields, 0..) |s_field, i| {
                         errdefer freeFieldSubset(i, gpa_opt, value, ctx);
                         const field_codec: *const Codec(s_field.type) = @field(field_codecs, s_field.name);
-
-                        const field_ctx = if (DecodeCtx != void) blk: {
-                            const pl_ctx = if (@typeInfo(DecodeCtx) != .optional) ctx else ctx orelse
-                                break :blk if (field_codec.DecodeCtx != void) null;
-                            break :blk @field(pl_ctx, s_field.name);
-                        };
-
+                        const field_ctx = getFieldCtx(ctx, s_field.name, field_codec.DecodeCtx);
                         const field_ptr = &@field(value, s_field.name);
                         try field_codec.decodeInto(reader, gpa_opt, config, field_ptr, field_ctx);
                     }
@@ -873,18 +851,31 @@ pub fn Codec(comptime V: type) type {
                     comptime n_fields_to_deinit: usize,
                     gpa_opt: ?std.mem.Allocator,
                     value: *const V,
-                    ctx: DecodeCtx,
+                    maybe_ctx: DecodeCtx,
                 ) void {
                     inline for (s_fields[0..n_fields_to_deinit]) |s_field| {
                         const field_codec: *const Codec(s_field.type) = @field(field_codecs, s_field.name);
-                        const field_ctx = if (DecodeCtx != void) blk: {
-                            const pl_ctx = if (@typeInfo(DecodeCtx) != .optional) ctx else ctx orelse
-                                break :blk if (field_codec.DecodeCtx != void) null;
-                            break :blk @field(pl_ctx, s_field.name);
-                        };
+                        const field_ctx = getFieldCtx(maybe_ctx, s_field.name, field_codec.DecodeCtx);
                         const field_ptr = &@field(value, s_field.name);
                         field_codec.free(gpa_opt, field_ptr, field_ctx);
                     }
+                }
+
+                fn getFieldCtx(
+                    maybe_ctx: anytype,
+                    comptime field_name: []const u8,
+                    comptime FieldCtxType: type,
+                ) FieldCtxType {
+                    const CtxType = @TypeOf(maybe_ctx);
+                    if (CtxType != EncodeCtx and CtxType != DecodeCtx) unreachable;
+
+                    if (FieldCtxType == void) return {};
+                    const ctx = switch (@typeInfo(CtxType)) {
+                        .void => return {},
+                        .optional => maybe_ctx orelse return null,
+                        else => maybe_ctx,
+                    };
+                    return @field(ctx, field_name);
                 }
             });
 
@@ -901,13 +892,18 @@ pub fn Codec(comptime V: type) type {
 
         pub const StdUnionEncodeCtx = StdStructEncodeCtx;
 
-        pub fn StdUnionDecodeCtx(payload_codecs: Fields) type {
-            _, const PayloadDecodeCtx = FieldContexts(payload_codecs);
+        pub fn StdUnionDecodeCtx(
+            payload_codecs: Fields,
+        ) type {
+            _, const PayloadDecodeCtx, _, _ = FieldContexts(payload_codecs);
+            return StdUnionDecodeCtxGeneric(PayloadDecodeCtx);
+        }
+
+        pub fn StdUnionDecodeCtxGeneric(comptime PayloadDecodeCtx: type) type {
+            const Tag = @typeInfo(V).@"union".tag_type.?;
             return struct {
                 diag: ?*Codec(Tag).StdDiscriminantDecodeCtx,
                 pl: PayloadDecodeCtx,
-
-                const Tag = @typeInfo(V).@"union".tag_type.?;
             };
         }
 
@@ -938,16 +934,23 @@ pub fn Codec(comptime V: type) type {
         ) CodecSelf {
             const union_info = @typeInfo(V).@"union";
             const Tag = union_info.tag_type.?;
-            const EncodeCtx = StdUnionEncodeCtx(payload_codecs);
-            const DecodeCtx = StdUnionDecodeCtx(payload_codecs);
 
-            @setEvalBranchQuota(union_info.fields.len);
-            const any_free = for (union_info.fields) |u_field| {
-                const payload_codec: *const Codec(u_field.type) = @field(payload_codecs, u_field.name);
-                if (payload_codec.freeFn != null) break true;
-            } else false;
+            const EncodeCtx, //
+            const PayloadDecodeCtx, //
+            _, //
+            const free_req //
+            = FieldContexts(payload_codecs);
+            const DecodeCtx = StdUnionDecodeCtxGeneric(PayloadDecodeCtx);
 
-            const erased = ImplementMethods(EncodeCtx, DecodeCtx, struct {
+            const pl_field_kind: FieldGroupKind = .fromType(@FieldType(DecodeCtx, "pl"));
+            const any_free = free_req == .need_free;
+
+            const DecodeCtxParam = switch (pl_field_kind) {
+                .all_void, .all_opt_or_void => ?DecodeCtx,
+                .some_required => DecodeCtx,
+            };
+
+            const erased = ImplementMethods(EncodeCtx, DecodeCtxParam, struct {
                 const StdUnionImpl = @This();
                 const tag_codec: Codec(Tag) = .std_discriminant;
 
@@ -963,7 +966,6 @@ pub fn Codec(comptime V: type) type {
                         inline else => |*payload_ptr, itag| {
                             const Payload = @TypeOf(payload_ptr.*);
                             const payload_codec: *const Codec(Payload) = @field(payload_codecs, @tagName(itag));
-
                             const payload_ctx: payload_codec.EncodeCtx = ctx: {
                                 const ctx = switch (@typeInfo(payload_codec.EncodeCtx)) {
                                     .void => break :ctx {},
@@ -981,21 +983,14 @@ pub fn Codec(comptime V: type) type {
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
                     values: []V,
-                    ctx: DecodeCtx,
+                    maybe_ctx: DecodeCtxParam,
                 ) std.mem.Allocator.Error!void {
                     const decode_init_tag = comptime decode_init_tag_opt.?;
+                    const ctx: DecodeCtx = unwrapMaybeCtx(maybe_ctx);
 
                     const Payload = @FieldType(V, @tagName(decode_init_tag));
                     const payload_codec: *const Codec(Payload) = @field(payload_codecs, @tagName(decode_init_tag));
-
-                    const payload_ctx: payload_codec.DecodeCtx = ctx: {
-                        const pl_ctx_union = switch (@typeInfo(payload_codec.DecodeCtx)) {
-                            .void => break :ctx {},
-                            .optional => ctx.pl orelse break :ctx null,
-                            else => ctx.pl,
-                        };
-                        break :ctx @field(pl_ctx_union, @tagName(decode_init_tag));
-                    };
+                    const payload_ctx: payload_codec.DecodeCtx = getPlCtx(ctx, @tagName(decode_init_tag), payload_codec.DecodeCtx);
 
                     @memset(values, comptime @unionInit(V, @tagName(decode_init_tag), undefined));
                     if (comptime payload_codec.decodeInitFn != null) {
@@ -1015,22 +1010,15 @@ pub fn Codec(comptime V: type) type {
                     config: Config,
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
-                    ctx: DecodeCtx,
+                    maybe_ctx: DecodeCtxParam,
                 ) DecodeReaderError!void {
                     const valid_init_state = comptime decode_init_tag_opt != null;
+                    const ctx: DecodeCtx = unwrapMaybeCtx(maybe_ctx);
                     switch (try tag_codec.decode(reader, null, config, ctx.diag)) {
                         inline else => |decoded_tag| {
                             const Payload = @FieldType(V, @tagName(decoded_tag));
                             const payload_codec: *const Codec(Payload) = @field(payload_codecs, @tagName(decoded_tag));
-
-                            const payload_ctx: payload_codec.DecodeCtx = ctx: {
-                                const pl_ctx_union = switch (@typeInfo(payload_codec.DecodeCtx)) {
-                                    .void => break :ctx {},
-                                    .optional => ctx.pl orelse break :ctx null,
-                                    else => ctx.pl,
-                                };
-                                break :ctx @field(pl_ctx_union, @tagName(decoded_tag));
-                            };
+                            const payload_ctx: payload_codec.DecodeCtx = getPlCtx(ctx, @tagName(decoded_tag), payload_codec.DecodeCtx);
 
                             // if there's no valid inital state to worry about, just ovewrite and decode
                             if (!valid_init_state) {
@@ -1056,26 +1044,53 @@ pub fn Codec(comptime V: type) type {
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
                     value: *const V,
-                    ctx: DecodeCtx,
+                    maybe_ctx: DecodeCtxParam,
                 ) void {
                     comptime if (!any_free) unreachable;
+                    const ctx: DecodeCtx = unwrapMaybeCtx(maybe_ctx);
                     switch (value.*) {
                         inline else => |*payload_ptr, itag| {
                             const Payload = @FieldType(V, @tagName(itag));
                             const payload_codec: *const Codec(Payload) = @field(payload_codecs, @tagName(itag));
-
-                            const payload_ctx: payload_codec.DecodeCtx = ctx: {
-                                const pl_ctx_union = switch (@typeInfo(payload_codec.DecodeCtx)) {
-                                    .void => break :ctx {},
-                                    .optional => ctx.pl orelse break :ctx null,
-                                    else => ctx.pl,
-                                };
-                                break :ctx @field(pl_ctx_union, @tagName(itag));
-                            };
-
+                            const payload_ctx: payload_codec.DecodeCtx = getPlCtx(ctx, @tagName(itag), payload_codec.DecodeCtx);
                             payload_codec.free(gpa_opt, payload_ptr, payload_ctx);
                         },
                     }
+                }
+
+                fn unwrapMaybeCtx(maybe_ctx: DecodeCtxParam) DecodeCtx {
+                    return switch (pl_field_kind) {
+                        .all_void => maybe_ctx orelse .{
+                            .diag = null,
+                            .pl = {},
+                        },
+                        .all_opt_or_void => maybe_ctx orelse .{
+                            .diag = null,
+                            .pl = null,
+                        },
+                        .some_required => maybe_ctx,
+                    };
+                }
+
+                fn getPlCtx(
+                    maybe_ctx: anytype,
+                    comptime field_name: []const u8,
+                    comptime FieldCtxType: type,
+                ) FieldCtxType {
+                    const CtxType = @TypeOf(maybe_ctx);
+                    if (CtxType != EncodeCtx and CtxType != DecodeCtx) unreachable;
+
+                    if (FieldCtxType == void) return {};
+                    const union_ctx = switch (@typeInfo(CtxType)) {
+                        .void => return {},
+                        .optional => maybe_ctx orelse return null,
+                        else => maybe_ctx,
+                    };
+                    const pl_ctx = if (@typeInfo(FieldCtxType) == .optional)
+                        union_ctx.pl orelse return null
+                    else
+                        union_ctx.pl;
+                    return @field(pl_ctx, field_name);
                 }
             });
 
@@ -1083,7 +1098,7 @@ pub fn Codec(comptime V: type) type {
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
 
-                .DecodeCtx = DecodeCtx,
+                .DecodeCtx = DecodeCtxParam,
                 .decodeInitFn = if (decode_init_tag_opt != null) erased.decodeInit else null,
                 .decodeFn = erased.decode,
                 .freeFn = if (any_free) erased.free else null,
@@ -1842,11 +1857,7 @@ pub fn Codec(comptime V: type) type {
             });
         }
 
-        fn hmSpecKind(comptime EncOrDecCtx: type) enum {
-            some_required,
-            all_opt_or_void,
-            all_void,
-        } {
+        fn hmSpecKind(comptime EncOrDecCtx: type) FieldGroupKind {
             const void_key_ctx = @FieldType(EncOrDecCtx, "key") == void;
             const void_val_ctx = @FieldType(EncOrDecCtx, "val") == void;
 
@@ -1927,54 +1938,52 @@ pub fn Codec(comptime V: type) type {
             else => noreturn,
         };
 
-        pub fn FieldContexts(field_codecs: Fields) struct { type, type } {
+        pub fn FieldContexts(field_codecs: Fields) struct {
+            type,
+            type,
+            enum { need_decode_init, no_decode_init },
+            enum { need_free, no_free },
+        } {
             const fields, const is_tuple = switch (@typeInfo(V)) {
                 .@"struct" => |s_info| .{ s_info.fields, s_info.is_tuple },
                 .@"union" => |u_info| .{ u_info.fields, false },
                 else => @compileError("doesn't apply for " ++ @typeName(V)),
             };
 
-            const FieldKindState = enum {
-                some_required,
-                all_opt_or_void,
-                all_void,
-            };
+            var any_decode_init: bool = false;
+            var any_free: bool = false;
 
-            var field_kind_state_enc: FieldKindState = .all_void;
+            var enc_field_kind_max: FieldGroupKind = .all_void;
             var encode_fields: [fields.len]std.builtin.Type.StructField = undefined;
 
-            var field_kind_state_dec: FieldKindState = .all_void;
+            var dec_field_kind_max: FieldGroupKind = .all_void;
             var decode_fields: [fields.len]std.builtin.Type.StructField = undefined;
 
-            @setEvalBranchQuota(fields.len + 2);
+            @setEvalBranchQuota(fields.len * 5 + 2);
             for (&encode_fields, &decode_fields, fields) |*encode_field, *decode_field, field| {
-                const codec_field: *const Codec(field.type) = @field(field_codecs, field.name);
+                const field_codec: *const Codec(field.type) = @field(field_codecs, field.name);
 
-                const void_enc = codec_field.EncodeCtx == void;
-                const opt_enc = @typeInfo(codec_field.EncodeCtx) == .optional;
-                if (field_kind_state_enc != .some_required and !void_enc) {
-                    field_kind_state_enc = if (opt_enc) .all_opt_or_void else .some_required;
-                }
+                any_decode_init = any_decode_init or field_codec.decodeInitFn != null;
+                any_free = any_free or field_codec.freeFn != null;
 
+                const enc_field_kind: FieldGroupKind = .fromType(field_codec.EncodeCtx);
+                enc_field_kind_max = .max(enc_field_kind_max, enc_field_kind);
                 encode_field.* = .{
                     .name = field.name,
-                    .type = codec_field.EncodeCtx,
-                    .default_value_ptr = if (void_enc) @ptrCast(&{}) else null,
+                    .type = field_codec.EncodeCtx,
+                    .default_value_ptr = if (enc_field_kind == .all_void) @ptrCast(&{}) else null,
                     .is_comptime = false,
-                    .alignment = @alignOf(codec_field.EncodeCtx),
+                    .alignment = @alignOf(field_codec.EncodeCtx),
                 };
 
-                const void_dec = codec_field.DecodeCtx == void;
-                const opt_dec = @typeInfo(codec_field.DecodeCtx) == .optional;
-                if (field_kind_state_dec != .some_required and !void_dec) {
-                    field_kind_state_dec = if (opt_dec) .all_opt_or_void else .some_required;
-                }
+                const dec_field_kind: FieldGroupKind = .fromType(field_codec.DecodeCtx);
+                dec_field_kind_max = .max(dec_field_kind_max, dec_field_kind);
                 decode_field.* = .{
                     .name = field.name,
-                    .type = codec_field.DecodeCtx,
-                    .default_value_ptr = if (void_dec) @ptrCast(&{}) else null,
+                    .type = field_codec.DecodeCtx,
+                    .default_value_ptr = if (dec_field_kind == .all_void) @ptrCast(&{}) else null,
                     .is_comptime = false,
-                    .alignment = @alignOf(codec_field.DecodeCtx),
+                    .alignment = @alignOf(field_codec.DecodeCtx),
                 };
             }
 
@@ -1994,16 +2003,18 @@ pub fn Codec(comptime V: type) type {
             } });
 
             return .{
-                switch (field_kind_state_enc) {
+                switch (enc_field_kind_max) {
                     .all_void => void,
                     .all_opt_or_void => ?Enc,
                     .some_required => Enc,
                 },
-                switch (field_kind_state_dec) {
+                switch (dec_field_kind_max) {
                     .all_void => void,
                     .all_opt_or_void => ?Dec,
                     .some_required => Dec,
                 },
+                if (any_decode_init) .need_decode_init else .no_decode_init,
+                if (any_free) .need_free else .no_free,
             };
         }
 
@@ -2088,6 +2099,27 @@ pub fn Codec(comptime V: type) type {
         }
     };
 }
+
+const FieldGroupKind = enum(u2) {
+    /// All fields are void.
+    all_void = 0,
+    /// Some fields are not void, but are optional.
+    all_opt_or_void = 1,
+    /// Some fields are not void, and are also not optional.
+    some_required = 2,
+
+    fn fromType(comptime T: type) FieldGroupKind {
+        return switch (@typeInfo(T)) {
+            .void => .all_void,
+            .optional => .all_opt_or_void,
+            else => .some_required,
+        };
+    }
+
+    fn max(a: FieldGroupKind, b: FieldGroupKind) FieldGroupKind {
+        return @enumFromInt(@max(@intFromEnum(a), @intFromEnum(b)));
+    }
+};
 
 const ArrayHashMapInfo = struct {
     K: type,
@@ -2317,10 +2349,7 @@ test "stdUnion" {
         U,
         U.bk_codec,
         {},
-        .{
-            .diag = null,
-            .pl = null,
-        },
+        null,
         &.{
             .void,
             .{ .char = 42 },
