@@ -15,6 +15,16 @@ pub const Config = struct {
         .endian = .little,
         .int = .varint,
     };
+
+    pub inline fn cfg(
+        endian: std.builtin.Endian,
+        int: IntEncoding,
+    ) Config {
+        return .{
+            .endian = endian,
+            .int = int,
+        };
+    }
 };
 
 pub const EncodeError = error{
@@ -665,7 +675,13 @@ pub fn Codec(comptime V: type) type {
             const EncodeCtx = payload_codec.EncodeCtx;
             const DecodeCtx = StdOptionalDecodeCtx(payload_codec.DecodeCtx);
 
-            const erased = ImplementMethods(EncodeCtx, DecodeCtx, struct {
+            const decode_ctx_opt = switch (@typeInfo(payload_codec.DecodeCtx)) {
+                .void, .optional => true,
+                else => false,
+            };
+            const DecodeCtxParam = if (decode_ctx_opt) ?DecodeCtx else DecodeCtx;
+
+            const erased = ImplementMethods(EncodeCtx, DecodeCtxParam, struct {
                 const Unwrapped = @typeInfo(V).optional.child;
 
                 pub fn encode(
@@ -685,7 +701,7 @@ pub fn Codec(comptime V: type) type {
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
                     values: []V,
-                    _: DecodeCtx,
+                    _: DecodeCtxParam,
                 ) std.mem.Allocator.Error!void {
                     _ = gpa_opt;
                     @memset(values, null);
@@ -696,8 +712,15 @@ pub fn Codec(comptime V: type) type {
                     config: Config,
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
-                    ctx: DecodeCtx,
+                    maybe_ctx: DecodeCtxParam,
                 ) DecodeReaderError!void {
+                    const ctx: DecodeCtx = ctx: {
+                        if (!decode_ctx_opt) break :ctx maybe_ctx;
+                        break :ctx maybe_ctx orelse .{
+                            .diag = null,
+                            .pl = if (payload_codec.DecodeCtx != void) null,
+                        };
+                    };
                     const is_some = try std_bool.decode(reader, null, config, ctx.diag);
                     if (is_some) {
                         if (payload_codec.decodeInitFn == null or value.* == null) {
@@ -716,7 +739,7 @@ pub fn Codec(comptime V: type) type {
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
                     value: *const V,
-                    ctx: DecodeCtx,
+                    ctx: DecodeCtxParam,
                 ) void {
                     const unwrapped = if (value.*) |*unwrapped| unwrapped else return;
                     payload_codec.free(ctx.pl, gpa_opt, unwrapped);
@@ -1549,7 +1572,7 @@ pub fn Codec(comptime V: type) type {
             else => noreturn,
         };
 
-        /// Standard codec for an arraylist. Encodes the length.
+        /// Standard codec for an arraylist.
         /// Requires allocation, for the arraylist, and possibly for the elements (based on element codec).
         ///
         /// Decode's initial state is `.empty`. If it is non-empty, it must have been allocated using
@@ -1627,6 +1650,215 @@ pub fn Codec(comptime V: type) type {
                     copy.deinit(gpa);
                 }
             });
+        }
+
+        const maybe_array_hm_info: ?ArrayHashMapInfo = .from(V);
+
+        pub fn StdArrayHashMapCtxs(
+            key: Codec(if (maybe_array_hm_info) |hm_info| hm_info.K else void),
+            val: Codec(if (maybe_array_hm_info) |hm_info| hm_info.V else void),
+        ) type {
+            return struct {
+                pub const EncodeCtx = struct {
+                    key: key.EncodeCtx,
+                    val: val.EncodeCtx,
+                };
+                pub const DecodeCtx = struct {
+                    key: key.DecodeCtx,
+                    val: val.DecodeCtx,
+                };
+            };
+        }
+
+        /// Standard codec for an auto hash map.
+        /// Requires allocation, for the hashmap, and possibly for the entries (based on key val codec).
+        ///
+        /// Decode's initial state is `.empty`. If it is non-empty, it must have been allocated using
+        /// the supplied `gpa_opt.?`; it will be resized to the decoded length if necessary, freeing
+        /// the discarded elements or initializing added elements using the key/val codec, and decoding
+        /// into the existing elements, which must be in a valid initial state conforming to key/val codec's
+        /// documented expectations.
+        pub fn stdArrayHashMap(
+            key_codec: Codec(if (maybe_array_hm_info) |hm_info| hm_info.K else void),
+            val_codec: Codec(if (maybe_array_hm_info) |hm_info| hm_info.V else void),
+        ) CodecSelf {
+            const hm_info = comptime maybe_array_hm_info orelse @compileError(@typeName(V) ++ " is not an array hash map.");
+            const Map = std.ArrayHashMapUnmanaged(
+                hm_info.K,
+                hm_info.V,
+                hm_info.Context,
+                hm_info.store_hash,
+            );
+            const Ctxs = StdArrayHashMapCtxs(key_codec, val_codec);
+            const EncodeCtx = Ctxs.EncodeCtx;
+            const DecodeCtx = Ctxs.DecodeCtx;
+
+            const EncodeCtxParam = switch (hmSpecKind(EncodeCtx)) {
+                .some_required => EncodeCtx,
+                .all_opt_or_void => ?EncodeCtx,
+                .all_void => void,
+            };
+            const DecodeCtxParam = switch (hmSpecKind(DecodeCtx)) {
+                .some_required => DecodeCtx,
+                .all_opt_or_void => ?DecodeCtx,
+                .all_void => void,
+            };
+
+            return .implement(EncodeCtxParam, DecodeCtxParam, struct {
+                pub fn encode(
+                    writer: *std.Io.Writer,
+                    config: Config,
+                    value: *const Map,
+                    maybe_ctx: EncodeCtxParam,
+                ) EncodeWriterError!void {
+                    const key_ctx: key_codec.EncodeCtx = ctx: {
+                        const ctx = switch (@typeInfo(key_codec.EncodeCtx)) {
+                            .void => break :ctx {},
+                            .optional => maybe_ctx orelse break :ctx null,
+                            else => maybe_ctx,
+                        };
+                        break :ctx ctx.key;
+                    };
+                    const val_ctx: val_codec.EncodeCtx = ctx: {
+                        const ctx = switch (@typeInfo(val_codec.EncodeCtx)) {
+                            .void => break :ctx {},
+                            .optional => maybe_ctx orelse break :ctx null,
+                            else => maybe_ctx,
+                        };
+                        break :ctx ctx.val;
+                    };
+
+                    try Codec(usize).std_int.encode(writer, config, &value.count(), {});
+                    for (value.keys(), value.values()) |*k, *v| {
+                        try key_codec.encode(writer, config, k, key_ctx);
+                        try val_codec.encode(writer, config, v, val_ctx);
+                    }
+                }
+
+                pub fn decodeInit(
+                    gpa_opt: ?std.mem.Allocator,
+                    values: []Map,
+                    _: DecodeCtxParam,
+                ) std.mem.Allocator.Error!void {
+                    _ = gpa_opt.?;
+                    @memset(values, .empty);
+                }
+
+                pub fn decode(
+                    reader: *std.Io.Reader,
+                    config: Config,
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *Map,
+                    maybe_ctx: DecodeCtxParam,
+                ) DecodeReaderError!void {
+                    const gpa = gpa_opt.?;
+                    const key_ctx, const val_ctx = unwrapDecodeKeyValCtxs(maybe_ctx);
+
+                    const len = try Codec(usize).std_int.decode(reader, null, config, {});
+                    try value.ensureTotalCapacity(gpa, len);
+
+                    const original_count = value.count();
+                    for (
+                        value.keys()[0..@min(len, original_count)],
+                        value.values()[0..@min(len, original_count)],
+                    ) |*k, *v| {
+                        try key_codec.decodeInto(reader, gpa, config, k, key_ctx);
+                        try val_codec.decodeInto(reader, gpa, config, v, key_ctx);
+                    }
+
+                    value.reIndex(gpa) catch |err| {
+                        freeKeysAndVals(gpa, value, maybe_ctx);
+                        value.clearRetainingCapacity();
+                        return err;
+                    };
+
+                    if (len < original_count) {
+                        for (
+                            value.keys()[len..],
+                            value.values()[len..],
+                        ) |*k, *v| {
+                            key_codec.free(gpa, k, key_ctx);
+                            val_codec.free(gpa, v, val_ctx);
+                        }
+                        value.shrinkRetainingCapacity(len);
+                    } else if (len > original_count) for (original_count..len) |_| {
+                        const k = try key_codec.decode(reader, gpa, config, key_ctx);
+                        errdefer key_codec.free(gpa, &k, key_ctx);
+
+                        const v = try val_codec.decode(reader, gpa, config, val_ctx);
+                        errdefer val_codec.free(gpa, &v, val_ctx);
+
+                        if (value.contains(k)) return error.DecodeFailed;
+                        value.putAssumeCapacity(k, v);
+                    };
+                }
+
+                pub fn free(
+                    gpa_opt: ?std.mem.Allocator,
+                    value: *const Map,
+                    maybe_ctx: DecodeCtxParam,
+                ) void {
+                    const gpa = gpa_opt.?;
+                    freeKeysAndVals(gpa, value, maybe_ctx);
+                    var copy = value.*;
+                    copy.deinit(gpa);
+                }
+
+                fn freeKeysAndVals(
+                    gpa: std.mem.Allocator,
+                    value: *const Map,
+                    maybe_ctx: DecodeCtxParam,
+                ) void {
+                    if (key_codec.freeFn == null and val_codec.freeFn == null) return;
+                    const key_ctx, const val_ctx = unwrapDecodeKeyValCtxs(maybe_ctx);
+                    for (value.keys(), value.values()) |*k, *v| {
+                        key_codec.free(gpa, k, key_ctx);
+                        val_codec.free(gpa, v, val_ctx);
+                    }
+                }
+
+                fn unwrapDecodeKeyValCtxs(
+                    maybe_ctx: DecodeCtxParam,
+                ) struct { key_codec.DecodeCtx, val_codec.DecodeCtx } {
+                    const key_ctx: key_codec.DecodeCtx = ctx: {
+                        const ctx = switch (@typeInfo(key_codec.DecodeCtx)) {
+                            .void => break :ctx {},
+                            .optional => maybe_ctx orelse break :ctx null,
+                            else => maybe_ctx,
+                        };
+                        break :ctx ctx.key;
+                    };
+                    const val_ctx: val_codec.DecodeCtx = ctx: {
+                        const ctx = switch (@typeInfo(val_codec.DecodeCtx)) {
+                            .void => break :ctx {},
+                            .optional => maybe_ctx orelse break :ctx null,
+                            else => maybe_ctx,
+                        };
+                        break :ctx ctx.val;
+                    };
+
+                    return .{ key_ctx, val_ctx };
+                }
+            });
+        }
+
+        fn hmSpecKind(comptime EncOrDecCtx: type) enum {
+            some_required,
+            all_opt_or_void,
+            all_void,
+        } {
+            const void_key_ctx = @FieldType(EncOrDecCtx, "key") == void;
+            const void_val_ctx = @FieldType(EncOrDecCtx, "val") == void;
+
+            const opt_key_ctx = @typeInfo(@FieldType(EncOrDecCtx, "key")) == .optional;
+            const opt_val_ctx = @typeInfo(@FieldType(EncOrDecCtx, "val")) == .optional;
+
+            const void_or_opt_key_ctx = void_key_ctx or opt_key_ctx;
+            const void_or_opt_val_ctx = void_val_ctx or opt_val_ctx;
+
+            if (void_key_ctx and void_val_ctx) return .all_void;
+            if (void_or_opt_key_ctx and void_or_opt_val_ctx) return .all_opt_or_void;
+            return .some_required;
         }
 
         /// The `Child` of `V`. Corresponds to `Child` in all of the following,
@@ -1857,6 +2089,66 @@ pub fn Codec(comptime V: type) type {
     };
 }
 
+const ArrayHashMapInfo = struct {
+    K: type,
+    V: type,
+    Context: type,
+    store_hash: bool,
+
+    pub fn from(comptime T: type) ?ArrayHashMapInfo {
+        if (@typeInfo(T) != .@"struct") return null;
+
+        if (!@hasDecl(T, "KV")) return null;
+        if (@TypeOf(&T.KV) != *const type) return null;
+        const KV = T.KV;
+
+        if (@typeInfo(KV) != .@"struct") return null;
+        if (!@hasField(KV, "key")) return null;
+        if (!@hasField(KV, "value")) return null;
+        const K = @FieldType(KV, "key");
+        const V = @FieldType(KV, "value");
+
+        if (!@hasDecl(T, "Hash")) return null;
+        if (@TypeOf(&T.Hash) != *const type) return null;
+        const store_hash = switch (T.Hash) {
+            u32 => true,
+            void => false,
+            else => return null,
+        };
+
+        if (!@hasDecl(T, "popContext")) return null;
+        const pop_ctx_fn_info = switch (@typeInfo(@TypeOf(T.popContext))) {
+            .@"fn" => |fn_info| fn_info,
+            else => return null,
+        };
+        if (pop_ctx_fn_info.params.len != 2) return null;
+        const Context = pop_ctx_fn_info.params[1].type orelse return null;
+
+        if (T != std.ArrayHashMapUnmanaged(K, V, Context, store_hash)) return null;
+
+        return .{
+            .K = K,
+            .V = V,
+            .Context = Context,
+            .store_hash = store_hash,
+        };
+    }
+};
+
+const testing = @import("testing.zig");
+
+inline fn encIntLit(comptime config: Config, comptime int: anytype) []const u8 {
+    const Int = if (@TypeOf(int) == usize) u64 else @TypeOf(int);
+    comptime return switch (config.int) {
+        .fixint => std.mem.toBytes(std.mem.nativeTo(Int, int, config.endian)),
+        .varint => varint.encodedLiteral(config.endian, int),
+    };
+}
+
+inline fn encStrLit(comptime config: Config, comptime str: []const u8) []const u8 {
+    return encIntLit(config, @as(usize, str.len)) ++ str;
+}
+
 test "std_void" {
     var null_reader: std.Io.Reader = .failing;
     var null_writer: std.Io.Writer.Discarding = .init(&.{});
@@ -1895,11 +2187,11 @@ test "std_int" {
     const u32_codec: Codec(u32) = .std_int;
     const config: Config = .{ .endian = .little, .int = .varint };
 
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, {}, {}, config, 250, &.{250});
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, {}, {}, config, 251, &.{ 251, 251, 0 });
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, {}, {}, config, 300, &.{ 251, 0x2C, 1 });
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, {}, {}, config, std.math.maxInt(u16), &.{ 251, 0xFF, 0xFF });
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, {}, {}, config, std.math.maxInt(u16) + 1, &.{ 252, 0, 0, 1, 0 });
+    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, 250, &.{250});
+    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, 251, &.{ 251, 251, 0 });
+    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, 300, &.{ 251, 0x2C, 1 });
+    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, std.math.maxInt(u16), &.{ 251, 0xFF, 0xFF });
+    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, std.math.maxInt(u16) + 1, &.{ 252, 0, 0, 1, 0 });
 
     try testCodecRoundTrips(i16, .std_int, {}, {}, &intTestEdgeCases(i16) ++ .{ 1, 5, 10000, 32, 8 });
     try testCodecRoundTrips(u16, .std_int, {}, {}, &intTestEdgeCases(u16) ++ .{ 1, 5, 10000, 32, 8 });
@@ -1956,9 +2248,9 @@ test "stdOptional" {
 
     const codec: Codec(?u32) = .stdOptional(.std_int);
     const config: Config = .{ .endian = .little, .int = .varint };
-    try testEncodedBytesAndRoundTrip(?u32, codec, {}, .{ .diag = null, .pl = {} }, config, 3, "\x01" ++ "\x03");
-    try testEncodedBytesAndRoundTrip(?u32, codec, {}, .{ .diag = null, .pl = {} }, config, null, "\x00");
-    try testEncodedBytesAndRoundTrip(?u32, codec, {}, .{ .diag = null, .pl = {} }, config, 251, "\x01" ++ "\xFB\xFB\x00");
+    try testEncodedBytesAndRoundTrip(?u32, codec, config, {}, .{ .diag = null, .pl = {} }, 3, "\x01" ++ "\x03");
+    try testEncodedBytesAndRoundTrip(?u32, codec, config, {}, .{ .diag = null, .pl = {} }, null, "\x00");
+    try testEncodedBytesAndRoundTrip(?u32, codec, config, {}, .{ .diag = null, .pl = {} }, 251, "\x01" ++ "\xFB\xFB\x00");
 }
 
 test "stdStruct" {
@@ -1988,9 +2280,9 @@ test "stdStruct" {
     try testEncodedBytesAndRoundTrip(
         S,
         S.bk_codec,
-        {},
-        {},
         .{ .endian = .little, .int = .varint },
+        {},
+        {},
         .{ .a = 1, .b = 0 },
         "\x01" ++ std.mem.toBytes(@as(f64, 0)),
     );
@@ -2115,6 +2407,7 @@ test "stdArrayList" {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+
     try testCodecRoundTrips(std.ArrayListUnmanaged(u32), .stdArrayList(.std_int), {}, {}, &.{
         .empty,
         .fromOwnedSlice(try arena.dupe(u32, &.{ 1, 2, 3 })),
@@ -2123,9 +2416,9 @@ test "stdArrayList" {
     try testEncodedBytesAndRoundTrip(
         std.ArrayListUnmanaged(u16),
         .stdArrayList(.std_int),
-        {},
-        {},
         .{ .endian = .little, .int = .varint },
+        {},
+        {},
         .fromOwnedSlice(try arena.dupe(u16, &.{ 0, 1, 250, 251 })),
         &[_]u8{4} ++ .{0} ++ .{1} ++ .{250} ++ .{ 251, 251, 0 },
     );
@@ -2149,6 +2442,113 @@ test "stdArrayList" {
         {},
     );
     try std.testing.expectEqualDeep(&[_][]const u8{ "fizz", "buzz" }, list.items);
+}
+
+test "stdArrayHashMap" {
+    const gpa = std.testing.allocator;
+
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const compare_ctx = struct {
+        pub fn compare(expected: anytype, actual: anytype) !bool {
+            const T = @TypeOf(expected, actual);
+            if (ArrayHashMapInfo.from(T) != null) {
+                try testing.expectEqualDeepWithOverrides(expected.keys(), actual.keys(), @This());
+                try testing.expectEqualDeepWithOverrides(expected.values(), actual.values(), @This());
+                return true;
+            }
+            return false;
+        }
+    };
+
+    const MapU32U32 = std.AutoArrayHashMapUnmanaged(u32, u32);
+    try testCodecRoundTripsInner(
+        MapU32U32,
+        .stdArrayHashMap(.std_int, .std_int),
+        {},
+        {},
+        &.{
+            .empty,
+            try initArrayHashMap(arena, MapU32U32, &.{ .{ 1, 2 }, .{ 3, 4 } }),
+            try initArrayHashMap(arena, MapU32U32, &.{ .{ 5, 6 }, .{ 7, 8 }, .{ 9, 10 } }),
+        },
+        compare_ctx,
+    );
+
+    const MapStrU16 = std.StringArrayHashMapUnmanaged(u16);
+    const lev: Config = comptime .cfg(.little, .varint);
+    try testEncodedBytesAndRoundTripInner(
+        MapStrU16,
+        .stdArrayHashMap(.std_byte_slice, .std_int),
+        lev,
+        {},
+        {},
+        try initArrayHashMap(arena, MapStrU16, &.{ .{ "foo", 2 }, .{ "bar", 4 } }),
+        encIntLit(lev, 2) ++
+            (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
+            (encStrLit(lev, "bar") ++ encIntLit(lev, 4)),
+        compare_ctx,
+    );
+
+    var list: MapStrU16 = .empty;
+    defer list.deinit(gpa);
+    defer for (list.keys()) |str| gpa.free(str);
+    try list.ensureTotalCapacity(gpa, 4);
+
+    list.putAssumeCapacity(try gpa.dupe(u8, "foo"), 100);
+    list.putAssumeCapacity(try gpa.dupe(u8, "bar"), 150);
+    list.putAssumeCapacity(try gpa.dupe(u8, "baz"), 200);
+    list.putAssumeCapacity(try gpa.dupe(u8, "fizz"), 250);
+    list.putAssumeCapacity(try gpa.dupe(u8, "buzz"), 300);
+
+    const map_str_u16_codec: Codec(MapStrU16) =
+        .stdArrayHashMap(.std_byte_slice, .std_int);
+    _ = try map_str_u16_codec.decodeSliceInto(
+        encIntLit(lev, 2) ++
+            (encStrLit(lev, "big") ++ encIntLit(lev, 350)) ++
+            (encStrLit(lev, "small") ++ encIntLit(lev, 400)),
+        gpa,
+        lev,
+        &list,
+        {},
+    );
+    try std.testing.expectEqualDeep(&[_][]const u8{ "big", "small" }, list.keys());
+    try std.testing.expectEqualSlices(u16, &.{ 350, 400 }, list.values());
+
+    _ = try map_str_u16_codec.decodeSliceInto(
+        encIntLit(lev, 4) ++
+            (encStrLit(lev, "a") ++ encIntLit(lev, 450)) ++
+            (encStrLit(lev, "bc") ++ encIntLit(lev, 500)) ++
+            (encStrLit(lev, "def") ++ encIntLit(lev, 550)) ++
+            (encStrLit(lev, "ghij") ++ encIntLit(lev, 600)),
+        gpa,
+        lev,
+        &list,
+        {},
+    );
+    try std.testing.expectEqualDeep(&[_][]const u8{ "a", "bc", "def", "ghij" }, list.keys());
+    try std.testing.expectEqualSlices(u16, &.{ 450, 500, 550, 600 }, list.values());
+}
+
+fn initArrayHashMap(
+    gpa: std.mem.Allocator,
+    comptime Hm: type,
+    key_vals: []const blk: {
+        const hm_info = ArrayHashMapInfo.from(Hm) orelse
+            @compileError(@typeName(Hm) ++ "is not a hash map");
+        break :blk struct { hm_info.K, hm_info.V };
+    },
+) !Hm {
+    var hm: Hm = .empty;
+    errdefer hm.deinit(gpa);
+    try hm.ensureTotalCapacity(gpa, @intCast(key_vals.len));
+    for (key_vals) |kv| {
+        const k, const v = kv;
+        hm.putAssumeCapacity(k, v);
+    }
+    return hm;
 }
 
 test "decodeSliceIgnoreLength" {
@@ -2299,19 +2699,49 @@ fn intTestEdgeCases(comptime T: type) [23]T {
 fn testEncodedBytesAndRoundTrip(
     comptime T: type,
     codec: Codec(T),
+    config: Config,
     enc_ctx: codec.EncodeCtx,
     dec_ctx: codec.DecodeCtx,
-    config: Config,
     value: T,
     expected: []const u8,
 ) !void {
-    const actual_bytes = try codec.encodeAlloc(std.testing.allocator, config, &value, enc_ctx);
+    try testEncodedBytesAndRoundTripInner(
+        T,
+        codec,
+        config,
+        enc_ctx,
+        dec_ctx,
+        value,
+        expected,
+        struct {
+            pub fn compare(_: anytype, _: anytype) !bool {
+                return false;
+            }
+        },
+    );
+}
+
+fn testEncodedBytesAndRoundTripInner(
+    comptime T: type,
+    codec: Codec(T),
+    config: Config,
+    enc_ctx: codec.EncodeCtx,
+    dec_ctx: codec.DecodeCtx,
+    original: T,
+    expected_bytes: []const u8,
+    /// Expects methods:
+    /// * `fn compare(expected: anytype, actual: @TypeOf(expected)) !bool`:
+    ///   Should return true if the values were compared, and otherwise false
+    ///   to fall back to default handling of comparison.
+    compare_ctx: anytype,
+) !void {
+    const actual_bytes = try codec.encodeAlloc(std.testing.allocator, config, &original, enc_ctx);
     defer std.testing.allocator.free(actual_bytes);
-    try std.testing.expectEqualSlices(u8, expected, actual_bytes);
+    try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
 
     const actual_value = codec.decodeSliceExact(actual_bytes, std.testing.allocator, config, dec_ctx);
     defer if (actual_value) |*unwrapped| codec.free(std.testing.allocator, unwrapped, dec_ctx) else |_| {};
-    try std.testing.expectEqualDeep(value, actual_value);
+    try testing.expectEqualDeepWithOverrides(original, actual_value, compare_ctx);
 }
 
 fn testCodecRoundTrips(
@@ -2320,6 +2750,32 @@ fn testCodecRoundTrips(
     enc_ctx: codec.EncodeCtx,
     dec_ctx: codec.DecodeCtx,
     values: []const T,
+) !void {
+    try testCodecRoundTripsInner(
+        T,
+        codec,
+        enc_ctx,
+        dec_ctx,
+        values,
+        struct {
+            pub fn compare(_: anytype, _: anytype) !bool {
+                return false;
+            }
+        },
+    );
+}
+
+fn testCodecRoundTripsInner(
+    comptime T: type,
+    codec: Codec(T),
+    enc_ctx: codec.EncodeCtx,
+    dec_ctx: codec.DecodeCtx,
+    values: []const T,
+    /// Expects methods:
+    /// * `fn compare(expected: anytype, actual: @TypeOf(expected)) !bool`:
+    ///   Should return true if the values were compared, and otherwise false
+    ///   to fall back to default handling of comparison.
+    compare_ctx: anytype,
 ) !void {
     var buffer: std.ArrayListUnmanaged(u8) = .empty;
     defer buffer.deinit(std.testing.allocator);
@@ -2351,7 +2807,7 @@ fn testCodecRoundTrips(
                 codec.free(std.testing.allocator, unwrapped, dec_ctx);
             } else |_| {};
             errdefer std.log.err("[{d}]: expected '{any}', actual: '{any}'", .{ i, expected, actual });
-            try std.testing.expectEqualDeep(expected, actual);
+            try testing.expectEqualDeepWithOverrides(expected, actual, compare_ctx);
         }
         try std.testing.expectEqual(0, encoded_reader.bufferedLen());
     }
