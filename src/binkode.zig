@@ -461,11 +461,22 @@ pub fn Codec(comptime V: type) type {
             pub const free = null;
         });
 
+        pub const StdIntDecodeDiag = struct {
+            /// Value of the actual decoded raw integer with an erroneous value.
+            /// Only set when `error.DecodeFailed` is returned.
+            raw_int: ?switch (@typeInfo(V).int.signedness) {
+                .unsigned => u256,
+                .signed => i256,
+            },
+
+            pub const init: StdIntDecodeDiag = .{ .raw_int = null };
+        };
+
         /// Standard codec for an integer. Encodes `usize` and `isize` as `u64` and `i64`, respectively.
         /// Never fails to encode.
         /// Failure to decode indicates that the value overflowed.
         /// Decode's initial state is write-only.
-        pub const std_int: CodecSelf = .implement(void, void, struct {
+        pub const std_int: CodecSelf = .implement(void, ?*StdIntDecodeDiag, struct {
             const signedness = @typeInfo(V).int.signedness;
             const Int = blk: {
                 switch (V) {
@@ -517,7 +528,7 @@ pub fn Codec(comptime V: type) type {
                 config: Config,
                 _: ?std.mem.Allocator,
                 value: *V,
-                _: void,
+                maybe_diag: ?*StdIntDecodeDiag,
             ) DecodeReaderError!void {
                 switch (config.int) {
                     .fixint => {
@@ -525,6 +536,7 @@ pub fn Codec(comptime V: type) type {
                         try reader.readSliceAll(&int_bytes);
                         const int = std.mem.readInt(Int, &int_bytes, config.endian);
                         if (std.math.minInt(V) > int or int > std.math.maxInt(V)) {
+                            if (maybe_diag) |diag| diag.raw_int = int;
                             return error.DecodeFailed;
                         }
                         value.* = @intCast(int);
@@ -534,6 +546,7 @@ pub fn Codec(comptime V: type) type {
                         switch (signedness) {
                             .unsigned => {
                                 if (raw_int > std.math.maxInt(V)) {
+                                    if (maybe_diag) |diag| diag.raw_int = raw_int;
                                     return error.DecodeFailed;
                                 }
                                 value.* = @intCast(raw_int);
@@ -541,11 +554,13 @@ pub fn Codec(comptime V: type) type {
                             .signed => {
                                 const EncodedInt = varint.zigzag.SignedAsUnsigned(Int);
                                 if (raw_int > std.math.maxInt(EncodedInt)) {
+                                    if (maybe_diag) |diag| diag.raw_int = varint.zigzag.signedFromUnsigned(i256, raw_int);
                                     return error.DecodeFailed;
                                 }
                                 const encoded_int: EncodedInt = @intCast(raw_int);
                                 const int: Int = varint.zigzag.signedFromUnsigned(Int, encoded_int);
                                 if (std.math.minInt(V) > int or int > std.math.maxInt(V)) {
+                                    if (maybe_diag) |diag| diag.raw_int = int;
                                     return error.DecodeFailed;
                                 }
                                 value.* = @intCast(int);
@@ -758,7 +773,7 @@ pub fn Codec(comptime V: type) type {
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
 
-                .DecodeCtx = DecodeCtx,
+                .DecodeCtx = DecodeCtxParam,
                 .decodeInitFn = if (payload_codec.decodeInitFn != null) erased.decodeInit else null,
                 .decodeFn = erased.decode,
                 .freeFn = if (payload_codec.freeFn != null) erased.free else null,
@@ -1161,7 +1176,7 @@ pub fn Codec(comptime V: type) type {
                 value: *V,
                 maybe_diag: ?*StdDiscriminantDecodeCtx,
             ) DecodeReaderError!void {
-                const as_u32 = try Codec(u32).std_int.decode(reader, null, config, {});
+                const as_u32 = try Codec(u32).std_int.decode(reader, null, config, null);
                 if (as_u32 > std.math.maxInt(enum_info.tag_type)) {
                     if (maybe_diag) |diag| diag.real_int = as_u32;
                     return error.DecodeFailed;
@@ -1399,7 +1414,7 @@ pub fn Codec(comptime V: type) type {
             ) DecodeReaderError!void {
                 const gpa = gpa_opt.?;
 
-                const len = try Codec(usize).std_int.decode(reader, null, config, {});
+                const len = try Codec(usize).std_int.decode(reader, null, config, null);
                 if (value.len != len) blk: {
                     const old_slice_mut = @constCast(value.*); // assumes this is allocated data, which must be mutable.
                     if (gpa.resize(old_slice_mut, len)) {
@@ -1457,7 +1472,7 @@ pub fn Codec(comptime V: type) type {
                 ) DecodeReaderError!void {
                     const gpa = gpa_opt.?;
 
-                    const len = try Codec(usize).std_int.decode(reader, null, config, {});
+                    const len = try Codec(usize).std_int.decode(reader, null, config, null);
                     const slice = try gpa.alignedAlloc(ptr_info.child, .fromByteUnits(ptr_info.alignment), len);
                     errdefer gpa.free(slice);
 
@@ -1516,7 +1531,7 @@ pub fn Codec(comptime V: type) type {
                 const gpa = gpa_opt.?;
 
                 const expected_len = @typeInfo(ptr_info.child).array.len;
-                const actual_len = try Codec(usize).std_int.decode(reader, null, config, {});
+                const actual_len = try Codec(usize).std_int.decode(reader, null, config, null);
                 if (actual_len != expected_len) return error.DecodeFailed;
 
                 const slice = (try gpa.alignedAlloc(
@@ -1569,7 +1584,7 @@ pub fn Codec(comptime V: type) type {
                     const gpa = gpa_opt.?;
 
                     const expected_len = @typeInfo(ptr_info.child).array.len;
-                    const actual_len = try Codec(usize).std_int.decode(reader, null, config, {});
+                    const actual_len = try Codec(usize).std_int.decode(reader, null, config, null);
                     if (actual_len != expected_len) return error.DecodeFailed;
 
                     const array_ptr = (try gpa.alignedAlloc(
@@ -1654,7 +1669,7 @@ pub fn Codec(comptime V: type) type {
                 ) DecodeReaderError!void {
                     const gpa = gpa_opt.?;
 
-                    const len = try Codec(usize).std_int.decode(reader, null, config, {});
+                    const len = try Codec(usize).std_int.decode(reader, null, config, null);
                     try value.ensureTotalCapacityPrecise(gpa, len);
 
                     if (len > value.items.len) {
@@ -1789,7 +1804,7 @@ pub fn Codec(comptime V: type) type {
                     const gpa = gpa_opt.?;
                     const key_ctx, const val_ctx = unwrapKeyValCtxs(.decode, maybe_ctx);
 
-                    const len = try Codec(usize).std_int.decode(reader, null, config, {});
+                    const len = try Codec(usize).std_int.decode(reader, null, config, null);
                     try value.ensureTotalCapacity(gpa, len);
 
                     const original_count = value.count();
@@ -2229,27 +2244,54 @@ test "std_bool" {
 }
 
 test "std_int" {
-    const u32_codec: Codec(u32) = .std_int;
-    const config: Config = .{ .endian = .little, .int = .varint };
+    try testEncodedBytesAndRoundTrip(u32, .std_int, .{
+        .config = .cfg(.little, .varint),
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = 250,
+        .expected_bytes = &.{250},
+    });
+    try testEncodedBytesAndRoundTrip(u32, .std_int, .{
+        .config = .cfg(.little, .varint),
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = 251,
+        .expected_bytes = &.{ 251, 251, 0 },
+    });
+    try testEncodedBytesAndRoundTrip(u32, .std_int, .{
+        .config = .cfg(.little, .varint),
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = 300,
+        .expected_bytes = &.{ 251, 0x2C, 1 },
+    });
+    try testEncodedBytesAndRoundTrip(u32, .std_int, .{
+        .config = .cfg(.little, .varint),
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = std.math.maxInt(u16),
+        .expected_bytes = &.{ 251, 0xFF, 0xFF },
+    });
+    try testEncodedBytesAndRoundTrip(u32, .std_int, .{
+        .config = .cfg(.little, .varint),
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = std.math.maxInt(u16) + 1,
+        .expected_bytes = &.{ 252, 0, 0, 1, 0 },
+    });
 
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, 250, &.{250});
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, 251, &.{ 251, 251, 0 });
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, 300, &.{ 251, 0x2C, 1 });
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, std.math.maxInt(u16), &.{ 251, 0xFF, 0xFF });
-    try testEncodedBytesAndRoundTrip(u32, u32_codec, config, {}, {}, std.math.maxInt(u16) + 1, &.{ 252, 0, 0, 1, 0 });
-
-    try testCodecRoundTrips(i16, .std_int, {}, {}, &intTestEdgeCases(i16) ++ .{ 1, 5, 10000, 32, 8 });
-    try testCodecRoundTrips(u16, .std_int, {}, {}, &intTestEdgeCases(u16) ++ .{ 1, 5, 10000, 32, 8 });
-    try testCodecRoundTrips(i32, .std_int, {}, {}, &intTestEdgeCases(i32) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(u32, .std_int, {}, {}, &intTestEdgeCases(u32) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(i64, .std_int, {}, {}, &intTestEdgeCases(i64) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(u64, .std_int, {}, {}, &intTestEdgeCases(u64) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(i128, .std_int, {}, {}, &intTestEdgeCases(i128) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(u128, .std_int, {}, {}, &intTestEdgeCases(u128) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(i256, .std_int, {}, {}, &intTestEdgeCases(i256) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(u256, .std_int, {}, {}, &intTestEdgeCases(u256) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(isize, .std_int, {}, {}, &intTestEdgeCases(isize) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(usize, .std_int, {}, {}, &intTestEdgeCases(usize) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i16, .std_int, {}, null, &intTestEdgeCases(i16) ++ .{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(u16, .std_int, {}, null, &intTestEdgeCases(u16) ++ .{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(i32, .std_int, {}, null, &intTestEdgeCases(i32) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u32, .std_int, {}, null, &intTestEdgeCases(u32) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i64, .std_int, {}, null, &intTestEdgeCases(i64) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u64, .std_int, {}, null, &intTestEdgeCases(u64) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i128, .std_int, {}, null, &intTestEdgeCases(i128) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u128, .std_int, {}, null, &intTestEdgeCases(u128) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i256, .std_int, {}, null, &intTestEdgeCases(i256) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u256, .std_int, {}, null, &intTestEdgeCases(u256) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(isize, .std_int, {}, null, &intTestEdgeCases(isize) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(usize, .std_int, {}, null, &intTestEdgeCases(usize) ++ .{ 1, 5, 1000000000, 32, 8 });
 }
 
 test "std_float" {
@@ -2283,19 +2325,36 @@ test "std_utf8_codepoint" {
 }
 
 test "stdOptional" {
-    try testCodecRoundTrips(?void, .stdOptional(.std_void), {}, .{ .diag = null, .pl = {} }, &.{ null, {}, null, {}, null, {} });
-    try testCodecRoundTrips(?bool, .stdOptional(.std_bool), {}, .{ .diag = null, .pl = null }, &.{
+    try testCodecRoundTrips(?void, .stdOptional(.std_void), {}, null, &.{ null, {}, null, {}, null, {} });
+    try testCodecRoundTrips(?bool, .stdOptional(.std_bool), {}, null, &.{
         null, false, null, true, null, true,
         null, false, true, true, null, false,
     });
-    try testCodecRoundTrips(?u32, .stdOptional(.std_int), {}, .{ .diag = null, .pl = {} }, &.{ null, 4, null, 10000, null, 100000000 });
-    try testCodecRoundTrips(?i64, .stdOptional(.std_int), {}, .{ .diag = null, .pl = {} }, &.{ null, -7, null, 20000, null, -100000000 });
+    try testCodecRoundTrips(?u32, .stdOptional(.std_int), {}, null, &.{ null, 4, null, 10000, null, 100000000 });
+    try testCodecRoundTrips(?i64, .stdOptional(.std_int), {}, null, &.{ null, -7, null, 20000, null, -100000000 });
 
-    const codec: Codec(?u32) = .stdOptional(.std_int);
-    const config: Config = .{ .endian = .little, .int = .varint };
-    try testEncodedBytesAndRoundTrip(?u32, codec, config, {}, .{ .diag = null, .pl = {} }, 3, "\x01" ++ "\x03");
-    try testEncodedBytesAndRoundTrip(?u32, codec, config, {}, .{ .diag = null, .pl = {} }, null, "\x00");
-    try testEncodedBytesAndRoundTrip(?u32, codec, config, {}, .{ .diag = null, .pl = {} }, 251, "\x01" ++ "\xFB\xFB\x00");
+    const config: Config = .cfg(.little, .varint);
+    try testEncodedBytesAndRoundTrip(?u32, .stdOptional(.std_int), .{
+        .config = config,
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = 3,
+        .expected_bytes = "\x01" ++ "\x03",
+    });
+    try testEncodedBytesAndRoundTrip(?u32, .stdOptional(.std_int), .{
+        .config = config,
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = null,
+        .expected_bytes = "\x00",
+    });
+    try testEncodedBytesAndRoundTrip(?u32, .stdOptional(.std_int), .{
+        .config = config,
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = 251,
+        .expected_bytes = "\x01" ++ "\xFB\xFB\x00",
+    });
 }
 
 test "stdStruct" {
@@ -2320,16 +2379,18 @@ test "stdStruct" {
 
         break :blk struct_test_edge_cases;
     };
-    try testCodecRoundTrips(S, S.bk_codec, {}, {}, &struct_test_edge_cases);
+    try testCodecRoundTrips(S, S.bk_codec, {}, null, &struct_test_edge_cases);
 
     try testEncodedBytesAndRoundTrip(
         S,
         S.bk_codec,
-        .{ .endian = .little, .int = .varint },
-        {},
-        {},
-        .{ .a = 1, .b = 0 },
-        "\x01" ++ std.mem.toBytes(@as(f64, 0)),
+        .{
+            .config = .cfg(.little, .varint),
+            .enc_ctx = {},
+            .dec_ctx = null,
+            .original = .{ .a = 1, .b = 0 },
+            .expected_bytes = "\x01" ++ std.mem.toBytes(@as(f64, 0)),
+        },
     );
 }
 
@@ -2378,8 +2439,8 @@ test "std_byte_array" {
 }
 
 test "stdArray" {
-    try testCodecRoundTrips([2]u64, .stdArray(.std_int), {}, {}, @ptrCast(&intTestEdgeCases(u64) ++ intTestEdgeCases(u64)));
-    try testCodecRoundTrips([2]u64, .stdArray(.std_int), {}, {}, &.{
+    try testCodecRoundTrips([2]u64, .stdArray(.std_int), {}, null, @ptrCast(&intTestEdgeCases(u64) ++ intTestEdgeCases(u64)));
+    try testCodecRoundTrips([2]u64, .stdArray(.std_int), {}, null, &.{
         .{ 1, 2 },
         .{ 61, 313131 },
         @splat(111111111),
@@ -2395,7 +2456,7 @@ test "stdArray" {
 }
 
 test "stdSingleItemPtr" {
-    try testCodecRoundTrips(*const u32, .stdSingleItemPtr(.std_int), {}, {}, &.{
+    try testCodecRoundTrips(*const u32, .stdSingleItemPtr(.std_int), {}, null, &.{
         &0, &1, &2, &10000, &std.math.maxInt(u32),
     });
 }
@@ -2408,7 +2469,7 @@ test "std_byte_slice" {
 }
 
 test "stdSlice" {
-    try testCodecRoundTrips([]const u32, .stdSlice(.std_int), {}, {}, &.{
+    try testCodecRoundTrips([]const u32, .stdSlice(.std_int), {}, null, &.{
         &.{ 0, 1, 2 },
         &.{ 3, 4, 5, 6 },
         &.{ 7, 8, 9, 10, 11 },
@@ -2433,7 +2494,7 @@ test "std_byte_array_ptr" {
 }
 
 test "stdArrayPtr" {
-    try testCodecRoundTrips(*const [3]u32, .stdArrayPtr(.std_int), {}, {}, &.{
+    try testCodecRoundTrips(*const [3]u32, .stdArrayPtr(.std_int), {}, null, &.{
         &.{ 0, 1, 2 },
         &.{ 3, 4, 5 },
         &.{ 7, 8, 9 },
@@ -2450,7 +2511,7 @@ test "stdArrayList" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    try testCodecRoundTrips(std.ArrayListUnmanaged(u32), .stdArrayList(.std_int), {}, {}, &.{
+    try testCodecRoundTrips(std.ArrayListUnmanaged(u32), .stdArrayList(.std_int), {}, null, &.{
         .empty,
         .fromOwnedSlice(try arena.dupe(u32, &.{ 1, 2, 3 })),
         .fromOwnedSlice(try arena.dupe(u32, &intTestEdgeCases(u32))),
@@ -2458,11 +2519,13 @@ test "stdArrayList" {
     try testEncodedBytesAndRoundTrip(
         std.ArrayListUnmanaged(u16),
         .stdArrayList(.std_int),
-        .{ .endian = .little, .int = .varint },
-        {},
-        {},
-        .fromOwnedSlice(try arena.dupe(u16, &.{ 0, 1, 250, 251 })),
-        &[_]u8{4} ++ .{0} ++ .{1} ++ .{250} ++ .{ 251, 251, 0 },
+        .{
+            .config = .cfg(.little, .varint),
+            .enc_ctx = {},
+            .dec_ctx = null,
+            .original = .fromOwnedSlice(try arena.dupe(u16, &.{ 0, 1, 250, 251 })),
+            .expected_bytes = &[_]u8{4} ++ .{0} ++ .{1} ++ .{250} ++ .{ 251, 251, 0 },
+        },
     );
 
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -2510,7 +2573,7 @@ test "stdArrayHashMap" {
         MapU32U32,
         .stdArrayHashMap(.std_int, .std_int),
         {},
-        {},
+        null,
         &.{
             .empty,
             try initArrayHashMap(arena, MapU32U32, &.{ .{ 1, 2 }, .{ 3, 4 } }),
@@ -2524,13 +2587,15 @@ test "stdArrayHashMap" {
     try testEncodedBytesAndRoundTripInner(
         MapStrU16,
         .stdArrayHashMap(.std_byte_slice, .std_int),
-        lev,
-        {},
-        {},
-        try initArrayHashMap(arena, MapStrU16, &.{ .{ "foo", 2 }, .{ "bar", 4 } }),
-        encIntLit(lev, 2) ++
-            (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
-            (encStrLit(lev, "bar") ++ encIntLit(lev, 4)),
+        .{
+            .config = lev,
+            .enc_ctx = {},
+            .dec_ctx = null,
+            .original = try initArrayHashMap(arena, MapStrU16, &.{ .{ "foo", 2 }, .{ "bar", 4 } }),
+            .expected_bytes = encIntLit(lev, 2) ++
+                (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
+                (encStrLit(lev, "bar") ++ encIntLit(lev, 4)),
+        },
         compare_ctx,
     );
 
@@ -2554,7 +2619,7 @@ test "stdArrayHashMap" {
         gpa,
         lev,
         &list,
-        {},
+        null,
     );
     try std.testing.expectEqualDeep(&[_][]const u8{ "big", "small" }, list.keys());
     try std.testing.expectEqualSlices(u16, &.{ 350, 400 }, list.values());
@@ -2568,7 +2633,7 @@ test "stdArrayHashMap" {
         gpa,
         lev,
         &list,
-        {},
+        null,
     );
     try std.testing.expectEqualDeep(&[_][]const u8{ "a", "bc", "def", "ghij" }, list.keys());
     try std.testing.expectEqualSlices(u16, &.{ 450, 500, 550, 600 }, list.values());
@@ -2598,15 +2663,15 @@ test "decodeSliceIgnoreLength" {
     const overlong_varint_src = [_]u8{ 250, 1 };
     try std.testing.expectEqual(
         250,
-        Codec(u32).std_int.decodeSliceExact((&overlong_varint_src)[0..1], null, config, {}),
+        Codec(u32).std_int.decodeSliceExact((&overlong_varint_src)[0..1], null, config, null),
     );
     try std.testing.expectError(
         error.Overlong,
-        Codec(u32).std_int.decodeSliceExact(&overlong_varint_src, null, config, {}),
+        Codec(u32).std_int.decodeSliceExact(&overlong_varint_src, null, config, null),
     );
     try std.testing.expectEqual(
         250,
-        Codec(u32).std_int.decodeSliceIgnoreLength(&overlong_varint_src, null, config, {}),
+        Codec(u32).std_int.decodeSliceIgnoreLength(&overlong_varint_src, null, config, null),
     );
 }
 
@@ -2736,54 +2801,52 @@ fn intTestEdgeCases(comptime T: type) [23]T {
     };
 }
 
+fn TestEncodedBytesAndRoundTripParams(comptime T: type, codec: Codec(T)) type {
+    return struct {
+        config: Config,
+        enc_ctx: codec.EncodeCtx,
+        dec_ctx: codec.DecodeCtx,
+        original: T,
+        expected_bytes: []const u8,
+    };
+}
+
 /// Test that `value` encodes into the same bytes as `expected`, and then
 /// also test whether `expected` decodes back into the same as `value`.
 fn testEncodedBytesAndRoundTrip(
     comptime T: type,
     codec: Codec(T),
-    config: Config,
-    enc_ctx: codec.EncodeCtx,
-    dec_ctx: codec.DecodeCtx,
-    value: T,
-    expected: []const u8,
+    params: TestEncodedBytesAndRoundTripParams(T, codec),
 ) !void {
-    try testEncodedBytesAndRoundTripInner(
-        T,
-        codec,
-        config,
-        enc_ctx,
-        dec_ctx,
-        value,
-        expected,
-        struct {
-            pub fn compare(_: anytype, _: anytype) !bool {
-                return false;
-            }
-        },
-    );
+    try testEncodedBytesAndRoundTripInner(T, codec, params, struct {
+        pub fn compare(_: anytype, _: anytype) !bool {
+            return false;
+        }
+    });
 }
 
 fn testEncodedBytesAndRoundTripInner(
     comptime T: type,
     codec: Codec(T),
-    config: Config,
-    enc_ctx: codec.EncodeCtx,
-    dec_ctx: codec.DecodeCtx,
-    original: T,
-    expected_bytes: []const u8,
+    params: TestEncodedBytesAndRoundTripParams(T, codec),
     /// Expects methods:
     /// * `fn compare(expected: anytype, actual: @TypeOf(expected)) !bool`:
     ///   Should return true if the values were compared, and otherwise false
     ///   to fall back to default handling of comparison.
     compare_ctx: anytype,
 ) !void {
-    const actual_bytes = try codec.encodeAlloc(std.testing.allocator, config, &original, enc_ctx);
+    const actual_bytes = try codec.encodeAlloc(
+        std.testing.allocator,
+        params.config,
+        &params.original,
+        params.enc_ctx,
+    );
     defer std.testing.allocator.free(actual_bytes);
-    try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
+    try std.testing.expectEqualSlices(u8, params.expected_bytes, actual_bytes);
 
-    const actual_value = codec.decodeSliceExact(actual_bytes, std.testing.allocator, config, dec_ctx);
-    defer if (actual_value) |*unwrapped| codec.free(std.testing.allocator, unwrapped, dec_ctx) else |_| {};
-    try testing.expectEqualDeepWithOverrides(original, actual_value, compare_ctx);
+    const actual_value = codec.decodeSliceExact(actual_bytes, std.testing.allocator, params.config, params.dec_ctx);
+    defer if (actual_value) |*unwrapped| codec.free(std.testing.allocator, unwrapped, params.dec_ctx) else |_| {};
+    try testing.expectEqualDeepWithOverrides(params.original, actual_value, compare_ctx);
 }
 
 fn testCodecRoundTrips(
