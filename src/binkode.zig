@@ -1798,7 +1798,7 @@ pub fn Codec(comptime V: type) type {
                         value.values()[0..@min(len, original_count)],
                     ) |*k, *v| {
                         try key_codec.decodeInto(reader, gpa, config, k, key_ctx);
-                        try val_codec.decodeInto(reader, gpa, config, v, key_ctx);
+                        try val_codec.decodeInto(reader, gpa, config, v, val_ctx);
                     }
 
                     value.reIndex(gpa) catch |err| {
