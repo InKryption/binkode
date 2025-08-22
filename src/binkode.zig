@@ -171,7 +171,7 @@ pub fn Codec(comptime V: type) type {
             value: *const V,
             ctx: self.EncodeCtx,
         ) (EncodeError || std.mem.Allocator.Error)![]u8 {
-            var list: std.ArrayListUnmanaged(u8) = .empty;
+            var list: std.ArrayList(u8) = .empty;
             defer list.deinit(gpa);
             try self.encodeToArrayList(gpa, &list, config, value, ctx);
             return try list.toOwnedSlice(gpa);
@@ -182,7 +182,7 @@ pub fn Codec(comptime V: type) type {
         pub fn encodeToArrayList(
             self: CodecSelf,
             gpa: std.mem.Allocator,
-            list: *std.ArrayListUnmanaged(u8),
+            list: *std.ArrayList(u8),
             config: Config,
             value: *const V,
             ctx: self.EncodeCtx,
@@ -2511,13 +2511,13 @@ test "stdArrayList" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    try testCodecRoundTrips(std.ArrayListUnmanaged(u32), .stdArrayList(.std_int), {}, null, &.{
+    try testCodecRoundTrips(std.ArrayList(u32), .stdArrayList(.std_int), {}, null, &.{
         .empty,
         .fromOwnedSlice(try arena.dupe(u32, &.{ 1, 2, 3 })),
         .fromOwnedSlice(try arena.dupe(u32, &intTestEdgeCases(u32))),
     });
     try testEncodedBytesAndRoundTrip(
-        std.ArrayListUnmanaged(u16),
+        std.ArrayList(u16),
         .stdArrayList(.std_int),
         .{
             .config = .cfg(.little, .varint),
@@ -2528,7 +2528,7 @@ test "stdArrayList" {
         },
     );
 
-    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var list: std.ArrayList([]const u8) = .empty;
     defer list.deinit(gpa);
     defer for (list.items) |str| gpa.free(str);
     try list.ensureTotalCapacityPrecise(gpa, 4);
@@ -2538,7 +2538,7 @@ test "stdArrayList" {
     list.appendAssumeCapacity(try gpa.dupe(u8, "baz"));
     list.appendAssumeCapacity(try gpa.dupe(u8, "boo"));
 
-    const str_array_list_codec: Codec(std.ArrayListUnmanaged([]const u8)) = .stdArrayList(.std_byte_slice);
+    const str_array_list_codec: Codec(std.ArrayList([]const u8)) = .stdArrayList(.std_byte_slice);
     _ = try str_array_list_codec.decodeSliceInto(
         .{2} ++ .{4} ++ "fizz" ++ .{4} ++ "buzz",
         gpa,
@@ -2700,7 +2700,7 @@ test "union memory re-use" {
     const arena = arena_state.allocator();
 
     const U = union(enum) {
-        a: std.ArrayListUnmanaged(u8),
+        a: std.ArrayList(u8),
         b: []const u8,
 
         const bk_codec: Codec(@This()) = .stdUnion(.a, .{
@@ -2882,7 +2882,7 @@ fn testCodecRoundTripsInner(
     ///   to fall back to default handling of comparison.
     compare_ctx: anytype,
 ) !void {
-    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(std.testing.allocator);
 
     const cfg_permutations = [_]Config{
