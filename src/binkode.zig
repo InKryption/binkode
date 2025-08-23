@@ -352,7 +352,7 @@ pub fn Codec(comptime V: type) type {
         /// Construct a codec from a composition of standard codecs for an assortment of types,
         /// defined to behave in line with the bincode specification.
         pub fn standard(std_codec: StdCodec(V)) CodecSelf {
-            return std_codec.base;
+            return std_codec.codec;
         }
 
         // -- Helpers for safely implementing common codecs -- //
