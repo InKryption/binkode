@@ -1311,6 +1311,56 @@ pub fn StdCodec(comptime V: type) type {
             }));
         }
 
+        /// Standard codec for a byte array list. Encodes the length. Optimization over `arrayList(&.byte)`.
+        /// Requires allocation.
+        /// Decode's initial state is `.empty`. If it is non-empty, it must have been allocated using
+        /// the supplied `gpa_opt.?`.
+        pub const byte_array_list: StdCodecSelf = .from(.implement(void, void, struct {
+            const ArrayList = std.array_list.Aligned(u8, maybe_array_list_info.?.alignment);
+
+            pub fn encode(
+                writer: *std.Io.Writer,
+                config: bk.Config,
+                value: *const ArrayList,
+                _: void,
+            ) bk.EncodeWriterError!void {
+                try length.codec.encode(writer, config, &value.items.len, {});
+                try writer.writeAll(value.items);
+            }
+
+            pub fn decodeInit(
+                gpa_opt: ?std.mem.Allocator,
+                values: []ArrayList,
+                _: void,
+            ) std.mem.Allocator.Error!void {
+                _ = gpa_opt.?;
+                @memset(values, .empty);
+            }
+
+            pub fn decode(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                gpa_opt: ?std.mem.Allocator,
+                value: *ArrayList,
+                _: void,
+            ) bk.DecodeReaderError!void {
+                const gpa = gpa_opt.?;
+                const len = try length.codec.decode(reader, null, config, null);
+                try value.resize(gpa, len);
+                try reader.readSliceAll(value.items);
+            }
+
+            pub fn free(
+                gpa_opt: ?std.mem.Allocator,
+                value: *const ArrayList,
+                _: void,
+            ) void {
+                const gpa = gpa_opt.?;
+                var copy = value.*;
+                copy.deinit(gpa);
+            }
+        }));
+
         const maybe_array_list_info: ?bk.std_reflect.ArrayListInfo = .from(V);
         pub const ArrayListElem: ?type = if (maybe_array_list_info) |al_info| al_info.Element else null;
 
@@ -2059,6 +2109,20 @@ test "arrayPtr" {
         &.{ 12, 13, 14 },
         &.{ 18, 19, 20 },
         &.{ 25, 26, 27 },
+    });
+}
+
+test "byte_array_list" {
+    const gpa = std.testing.allocator;
+
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try testCodecRoundTrips(std.ArrayList(u8), .standard(.byte_array_list), {}, {}, &.{
+        .fromOwnedSlice(try arena.dupe(u8, "")),
+        .fromOwnedSlice(try arena.dupe(u8, "foo")),
+        .fromOwnedSlice(try arena.dupe(u8, "baz")),
     });
 }
 
