@@ -1,8 +1,7 @@
 const std = @import("std");
 const bk = @import("binkode.zig");
 
-const utils = @import("utils.zig");
-const ArrayHashMapInfo = utils.ArrayHashMapInfo;
+const testing = @import("testing.zig");
 
 pub fn StdCodec(comptime V: type) type {
     if (V == noreturn) unreachable;
@@ -20,7 +19,7 @@ pub fn StdCodec(comptime V: type) type {
 
         /// Standard codec for a zero-sized value.
         /// Never fails to encode or decode.
-        pub const empty: StdCodecSelf = .implement(void, void, struct {
+        pub const empty: StdCodecSelf = .from(.implement(void, void, struct {
             comptime {
                 if (@sizeOf(V) != 0) @compileError(
                     "void codec is not implemented for type " ++ @typeName(V) ++
@@ -57,11 +56,11 @@ pub fn StdCodec(comptime V: type) type {
             }
 
             pub const free = null;
-        });
+        }));
 
         /// Standard codec for a byte.
         /// Never fails to encode or decode.
-        pub const byte: StdCodec(u8) = .implement(void, void, struct {
+        pub const byte: StdCodec(u8) = .from(.implement(void, void, struct {
             pub fn encode(
                 writer: *std.Io.Writer,
                 _: bk.Config,
@@ -84,7 +83,7 @@ pub fn StdCodec(comptime V: type) type {
             }
 
             pub const free = null;
-        });
+        }));
 
         pub const BoolDecodeDiag = struct {
             /// Value of the actual decoded byte with an erroneous value.
@@ -98,7 +97,7 @@ pub fn StdCodec(comptime V: type) type {
         /// Never fails to encode.
         /// Failure to decode indicates a byte value other than 0 or 1.
         /// Decode's initial state is write-only.
-        pub const boolean: StdCodec(bool) = .implement(void, ?*BoolDecodeDiag, struct {
+        pub const boolean: StdCodec(bool) = .from(.implement(void, ?*BoolDecodeDiag, struct {
             pub fn encode(
                 writer: *std.Io.Writer,
                 _: bk.Config,
@@ -130,7 +129,7 @@ pub fn StdCodec(comptime V: type) type {
             }
 
             pub const free = null;
-        });
+        }));
 
         pub const IntDecodeDiag = struct {
             /// Value of the actual decoded raw integer with an erroneous value.
@@ -152,7 +151,7 @@ pub fn StdCodec(comptime V: type) type {
         /// Never fails to encode.
         /// Failure to decode indicates that the value overflowed.
         /// Decode's initial state is write-only.
-        pub const int: StdCodecSelf = .implement(void, ?*IntDecodeDiag, struct {
+        pub const int: StdCodecSelf = .from(.implement(void, ?*IntDecodeDiag, struct {
             const signedness = @typeInfo(V).int.signedness;
             const Int = blk: {
                 switch (V) {
@@ -247,12 +246,12 @@ pub fn StdCodec(comptime V: type) type {
             }
 
             pub const free = null;
-        });
+        }));
 
         /// Standard codec for a float.
         /// Never fails to encode or decode.
         /// Decode's initial state is write-only.
-        pub const float: StdCodecSelf = .implement(void, void, struct {
+        pub const float: StdCodecSelf = .from(.implement(void, void, struct {
             const AsInt = std.meta.Int(.unsigned, @bitSizeOf(V));
             comptime {
                 switch (V) {
@@ -285,13 +284,13 @@ pub fn StdCodec(comptime V: type) type {
             }
 
             pub const free = null;
-        });
+        }));
 
         /// Standard codec for a UTF-8 codepoint.
         /// Failure to encode indicates an invalid codepoint value.
         /// Failure to decode indicates an invalid codepoint value.
         /// Decode's initial state is write-only.
-        pub const utf8_codepoint: StdCodecSelf = .implement(void, void, struct {
+        pub const utf8_codepoint: StdCodecSelf = .from(.implement(void, void, struct {
             comptime {
                 switch (V) {
                     u1, u2, u3, u4, u5, u6, u7 => {},
@@ -353,7 +352,7 @@ pub fn StdCodec(comptime V: type) type {
             }
 
             pub const free = null;
-        });
+        }));
 
         pub fn OptionalDecodeCtx(comptime PayloadCtx: type) type {
             return struct {
@@ -370,12 +369,20 @@ pub fn StdCodec(comptime V: type) type {
         /// the existing payload must conform to `payload_codec`'s expectations; if the decoded value is
         /// null, the `payload_codec` will be used to free the existing payload.
         /// Otherwise, when `payload_codec.decodeInitFn == null`, decode's initial state is write-only.
-        pub fn optional(payload_codec: StdCodec(Child)) StdCodecSelf {
-            return .optionalNonStd(.standard(payload_codec));
+        ///
+        /// Also see:
+        /// * `optionalNonStd`
+        /// * `OptionalDecodeCtx`
+        pub fn optional(payload: StdCodec(Child)) StdCodecSelf {
+            return .optionalNonStd(.standard(payload));
         }
 
         /// Same as `optional`, but directly accepting a non-standard `payload_codec`.
         /// Facilitates composition with non-standard codecs.
+        ///
+        /// Also see:
+        /// * `optional`
+        /// * `OptionalDecodeCtx`
         pub fn optionalNonStd(payload: bk.Codec(Child)) StdCodecSelf {
             const EncodeCtx = payload.EncodeCtx;
             const DecodeCtx = OptionalDecodeCtx(payload.DecodeCtx);
@@ -386,7 +393,7 @@ pub fn StdCodec(comptime V: type) type {
             };
             const DecodeCtxParam = if (decode_ctx_opt) ?DecodeCtx else DecodeCtx;
 
-            const erased = ImplementMethods(EncodeCtx, DecodeCtxParam, struct {
+            const erased = Base.ImplementMethods(EncodeCtx, DecodeCtxParam, struct {
                 const Unwrapped = @typeInfo(V).optional.child;
 
                 pub fn encode(
@@ -491,7 +498,7 @@ pub fn StdCodec(comptime V: type) type {
             const any_decode_init = decode_init_req == .need_decode_init;
             const any_free = free_req == .need_free;
 
-            const erased = ImplementMethods(EncodeCtx, DecodeCtx, struct {
+            const erased = Base.ImplementMethods(EncodeCtx, DecodeCtx, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
                     config: bk.Config,
@@ -652,7 +659,7 @@ pub fn StdCodec(comptime V: type) type {
                 .some_required => DecodeCtx,
             };
 
-            const erased = ImplementMethods(EncodeCtx, DecodeCtxParam, struct {
+            const erased = Base.ImplementMethods(EncodeCtx, DecodeCtxParam, struct {
                 const TaggedUnionImpl = @This();
                 const std_tag: StdCodec(Tag) = .discriminant;
 
@@ -819,7 +826,7 @@ pub fn StdCodec(comptime V: type) type {
         /// aka the tag of a tagged union, aka the tag of a rust enum.
         /// Failure to decode indicates the value overflowed or didn't match a valid value.
         /// Decode's initial state is write-only.
-        pub const discriminant: StdCodecSelf = .implement(void, ?*DiscriminantDecodeCtx, struct {
+        pub const discriminant: StdCodecSelf = .from(.implement(void, ?*DiscriminantDecodeCtx, struct {
             const enum_info = @typeInfo(V).@"enum";
             const tag_info = @typeInfo(enum_info.tag_type).int;
             comptime {
@@ -881,12 +888,12 @@ pub fn StdCodec(comptime V: type) type {
             }
 
             pub const free = null;
-        });
+        }));
 
         /// Standard codec for a byte array. Encodes no length.
         /// Optimization over `array(&.byte)`.
         /// Decode's initial state is write-only.
-        pub const byte_array: StdCodecSelf = .implement(void, void, struct {
+        pub const byte_array: StdCodecSelf = .from(.implement(void, void, struct {
             pub fn encode(
                 writer: *std.Io.Writer,
                 _: bk.Config,
@@ -909,7 +916,7 @@ pub fn StdCodec(comptime V: type) type {
             }
 
             pub const free = null;
-        });
+        }));
 
         /// Standard codec for an array.
         /// Allocation requirement defined by element codec.
@@ -918,7 +925,7 @@ pub fn StdCodec(comptime V: type) type {
         pub fn array(element: StdCodec(Element)) StdCodecSelf {
             const EncodeCtx = element.codec.EncodeCtx;
             const DecodeCtx = element.codec.DecodeCtx;
-            const erased = ImplementMethods(EncodeCtx, DecodeCtx, struct {
+            const erased = Base.ImplementMethods(EncodeCtx, DecodeCtx, struct {
                 const not_implemented_err_msg = "array codec not is not implemented for type " ++ @typeName(V);
 
                 pub fn encode(
@@ -995,7 +1002,7 @@ pub fn StdCodec(comptime V: type) type {
         pub fn singleItemPtr(child: StdCodec(Child)) StdCodecSelf {
             const EncodeCtx = child.codec.EncodeCtx;
             const DecodeCtx = child.codec.DecodeCtx;
-            return .implement(EncodeCtx, DecodeCtx, struct {
+            return .from(.implement(EncodeCtx, DecodeCtx, struct {
                 const ptr_info = @typeInfo(V).pointer;
                 comptime {
                     if (ptr_info.size != .one) @compileError(
@@ -1051,7 +1058,7 @@ pub fn StdCodec(comptime V: type) type {
                     child.codec.free(gpa, value.*, ctx);
                     gpa.destroy(value.*);
                 }
-            });
+            }));
         }
 
         /// Standard codec for a byte slice. Encodes the length. Optimization over `slice(&.byte)`.
@@ -1063,7 +1070,7 @@ pub fn StdCodec(comptime V: type) type {
         /// are assumed to be write-only during the duration of the function.
         /// Allocation failure while doing so may result in destruction of the original allocation,
         /// setting it to empty.
-        pub const byte_slice: StdCodecSelf = .implement(void, void, struct {
+        pub const byte_slice: StdCodecSelf = .from(.implement(void, void, struct {
             const ptr_info = @typeInfo(V).pointer;
             comptime {
                 if (ptr_info.size != .slice) @compileError(
@@ -1122,7 +1129,7 @@ pub fn StdCodec(comptime V: type) type {
                 const gpa = gpa_opt.?;
                 gpa.free(value.*);
             }
-        });
+        }));
 
         /// Standard codec for a slice. Encodes the length.
         /// Requires allocation, for the slice, and possibly for the elements (based on element codec).
@@ -1130,7 +1137,7 @@ pub fn StdCodec(comptime V: type) type {
         pub fn slice(element: StdCodec(Element)) StdCodecSelf {
             const EncodeCtx = element.codec.EncodeCtx;
             const DecodeCtx = element.codec.DecodeCtx;
-            return .implement(EncodeCtx, DecodeCtx, struct {
+            return .from(.implement(EncodeCtx, DecodeCtx, struct {
                 const ptr_info = @typeInfo(V).pointer;
                 comptime {
                     if (ptr_info.size != .slice) @compileError(
@@ -1183,12 +1190,12 @@ pub fn StdCodec(comptime V: type) type {
                     }
                     gpa.free(value.*);
                 }
-            });
+            }));
         }
 
         /// Standard codec for a byte array pointer. Encodes the length. Optimization over `arrayPtr(&.byte)`.
         /// Requires allocation.
-        pub const byte_array_ptr: StdCodecSelf = .implement(void, void, struct {
+        pub const byte_array_ptr: StdCodecSelf = .from(.implement(void, void, struct {
             const ptr_info = @typeInfo(V).pointer;
             comptime {
                 if (ptr_info.size != .one or @typeInfo(ptr_info.child) != .array) @compileError(
@@ -1235,7 +1242,7 @@ pub fn StdCodec(comptime V: type) type {
                 const gpa = gpa_opt.?;
                 gpa.free(value.*);
             }
-        });
+        }));
 
         /// Standard codec for an array pointer. Encodes the length.
         /// Also see `byte_array_ptr`.
@@ -1243,7 +1250,7 @@ pub fn StdCodec(comptime V: type) type {
         pub fn arrayPtr(element: StdCodec(Element)) StdCodecSelf {
             const EncodeCtx = element.codec.EncodeCtx;
             const DecodeCtx = element.codec.DecodeCtx;
-            return .implement(EncodeCtx, DecodeCtx, struct {
+            return .from(.implement(EncodeCtx, DecodeCtx, struct {
                 const ptr_info = @typeInfo(V).pointer;
                 comptime {
                     if (ptr_info.size != .one or @typeInfo(ptr_info.child) != .array) @compileError(
@@ -1298,29 +1305,11 @@ pub fn StdCodec(comptime V: type) type {
                     std_array.codec.free(gpa, value.*, ctx);
                     gpa.free(value.*);
                 }
-            });
+            }));
         }
 
-        pub const ArrayListSlice = switch (@typeInfo(V)) {
-            .@"struct" => blk: {
-                if (!@hasDecl(V, "Slice")) break :blk noreturn;
-                if (@TypeOf(&V.Slice) != *const type) break :blk noreturn;
-                const Slice = V.Slice;
-                const ptr_info = switch (@typeInfo(Slice)) {
-                    .pointer => |ptr_info| ptr_info,
-                    else => break :blk noreturn,
-                };
-                if (ptr_info.size != .slice) break :blk noreturn;
-                const Expected = std.array_list.Aligned(
-                    ptr_info.child,
-                    .fromByteUnits(ptr_info.alignment),
-                );
-                if (V != Expected) break :blk noreturn;
-                break :blk Slice;
-            },
-            else => noreturn,
-        };
-        const ArrayListElem = @typeInfo(ArrayListSlice).pointer.child;
+        const maybe_array_list_info: ?bk.std_reflect.ArrayListInfo = .from(V);
+        pub const ArrayListElem: ?type = if (maybe_array_list_info) |al_info| al_info.Element else null;
 
         /// Standard codec for an arraylist.
         /// Requires allocation, for the arraylist, and possibly for the elements (based on element codec).
@@ -1332,13 +1321,17 @@ pub fn StdCodec(comptime V: type) type {
         /// documented expectations.
         /// Allocation failure while doing so may result in destruction of the original allocation,
         /// setting it to empty.
-        pub fn arrayList(element: StdCodec(ArrayListElem)) StdCodecSelf {
-            const alignment: std.mem.Alignment =
-                .fromByteUnits(@typeInfo(V.Slice).pointer.alignment);
-            const ArrayList = std.array_list.Aligned(ArrayListElem, alignment);
+        pub fn arrayList(
+            element: StdCodec(ArrayListElem orelse void),
+        ) StdCodecSelf {
+            const ArrayList = std.array_list.Aligned(
+                ArrayListElem.?,
+                maybe_array_list_info.?.alignment,
+            );
+
             const EncodeCtx = element.codec.EncodeCtx;
             const DecodeCtx = element.codec.DecodeCtx;
-            return .implement(EncodeCtx, DecodeCtx, struct {
+            return .from(.implement(EncodeCtx, DecodeCtx, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
                     config: bk.Config,
@@ -1401,14 +1394,16 @@ pub fn StdCodec(comptime V: type) type {
                     var copy = value.*;
                     copy.deinit(gpa);
                 }
-            });
+            }));
         }
 
-        const maybe_array_hm_info: ?ArrayHashMapInfo = .from(V);
+        const maybe_ahm_info: ?bk.std_reflect.ArrayHashMapInfo = .from(V);
+        pub const ArrayHashMapKey = if (maybe_ahm_info) |hm_info| hm_info.K else noreturn;
+        pub const ArrayHashMapVal = if (maybe_ahm_info) |hm_info| hm_info.V else noreturn;
 
         pub fn ArrayHashMapCtxs(
-            std_key: StdCodec(if (maybe_array_hm_info) |hm_info| hm_info.K else void),
-            std_val: StdCodec(if (maybe_array_hm_info) |hm_info| hm_info.V else void),
+            std_key: StdCodec(ArrayHashMapKey),
+            std_val: StdCodec(ArrayHashMapVal),
         ) type {
             return struct {
                 pub const EncodeCtx = struct {
@@ -1434,10 +1429,10 @@ pub fn StdCodec(comptime V: type) type {
         /// Also see:
         /// * `arrayHashMapCtxs`
         pub fn arrayHashMap(
-            std_key: StdCodec(if (maybe_array_hm_info) |hm_info| hm_info.K else void),
-            std_val: StdCodec(if (maybe_array_hm_info) |hm_info| hm_info.V else void),
+            std_key: StdCodec(if (maybe_ahm_info) |hm_info| hm_info.K else void),
+            std_val: StdCodec(if (maybe_ahm_info) |hm_info| hm_info.V else void),
         ) StdCodecSelf {
-            const hm_info = comptime maybe_array_hm_info orelse @compileError(@typeName(V) ++ " is not an array hash map.");
+            const hm_info = comptime maybe_ahm_info orelse @compileError(@typeName(V) ++ " is not an array hash map.");
             const Map = std.ArrayHashMapUnmanaged(
                 hm_info.K,
                 hm_info.V,
@@ -1467,7 +1462,7 @@ pub fn StdCodec(comptime V: type) type {
                 .all_void => void,
             };
 
-            return .implement(EncodeCtxParam, DecodeCtxParam, struct {
+            return .from(.implement(EncodeCtxParam, DecodeCtxParam, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
                     config: bk.Config,
@@ -1595,7 +1590,7 @@ pub fn StdCodec(comptime V: type) type {
                     };
                     return .{ key_ctx, val_ctx };
                 }
-            });
+            }));
         }
 
         /// The `Child` of `V`. Corresponds to `Child` in all of the following,
@@ -1742,22 +1737,6 @@ pub fn StdCodec(comptime V: type) type {
                 if (any_decode_init) .need_decode_init else .no_decode_init,
                 if (any_free) .need_free else .no_free,
             };
-        }
-
-        fn implement(
-            comptime EncodeCtx: type,
-            comptime DecodeCtx: type,
-            comptime methods: type,
-        ) StdCodecSelf {
-            return .from(.implement(EncodeCtx, DecodeCtx, methods));
-        }
-
-        fn ImplementMethods(
-            comptime EncodeCtx: type,
-            comptime DecodeCtx: type,
-            comptime methods: type,
-        ) type {
-            return Base.ImplementMethods(EncodeCtx, DecodeCtx, methods);
         }
     };
 }
@@ -1967,17 +1946,13 @@ test "standard tuple" {
     };
     try testCodecRoundTrips(S, S.bk_codec, {}, null, &struct_test_edge_cases);
 
-    try testEncodedBytesAndRoundTrip(
-        S,
-        S.bk_codec,
-        .{
-            .config = .cfg(.little, .varint),
-            .enc_ctx = {},
-            .dec_ctx = null,
-            .original = .{ .a = 1, .b = 0 },
-            .expected_bytes = "\x01" ++ std.mem.toBytes(@as(f64, 0)),
-        },
-    );
+    try testEncodedBytesAndRoundTrip(S, S.bk_codec, .{
+        .config = .cfg(.little, .varint),
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = .{ .a = 1, .b = 0 },
+        .expected_bytes = "\x01" ++ std.mem.toBytes(@as(f64, 0)),
+    });
 }
 
 test "standard taggedUnion" {
@@ -2139,9 +2114,9 @@ test "standard arrayHashMap" {
     const compare_ctx = struct {
         pub fn compare(expected: anytype, actual: anytype) !bool {
             const T = @TypeOf(expected, actual);
-            if (ArrayHashMapInfo.from(T) != null) {
-                try utils.testing.expectEqualDeepWithOverrides(expected.keys(), actual.keys(), @This());
-                try utils.testing.expectEqualDeepWithOverrides(expected.values(), actual.values(), @This());
+            if (bk.std_reflect.ArrayHashMapInfo.from(T) != null) {
+                try testing.expectEqualDeepWithOverrides(expected.keys(), actual.keys(), @This());
+                try testing.expectEqualDeepWithOverrides(expected.values(), actual.values(), @This());
                 return true;
             }
             return false;
@@ -2223,7 +2198,7 @@ fn initArrayHashMap(
     gpa: std.mem.Allocator,
     comptime Hm: type,
     key_vals: []const blk: {
-        const hm_info = ArrayHashMapInfo.from(Hm) orelse
+        const hm_info = bk.std_reflect.ArrayHashMapInfo.from(Hm) orelse
             @compileError(@typeName(Hm) ++ "is not a hash map");
         break :blk struct { hm_info.K, hm_info.V };
     },
@@ -2426,7 +2401,7 @@ fn testEncodedBytesAndRoundTripInner(
 
     const actual_value = codec.decodeSliceExact(actual_bytes, std.testing.allocator, params.config, params.dec_ctx);
     defer if (actual_value) |*unwrapped| codec.free(std.testing.allocator, unwrapped, params.dec_ctx) else |_| {};
-    try utils.testing.expectEqualDeepWithOverrides(params.original, actual_value, compare_ctx);
+    try testing.expectEqualDeepWithOverrides(params.original, actual_value, compare_ctx);
 }
 
 fn testCodecRoundTrips(
@@ -2492,7 +2467,7 @@ fn testCodecRoundTripsInner(
                 codec.free(std.testing.allocator, unwrapped, dec_ctx);
             } else |_| {};
             errdefer std.log.err("[{d}]: expected '{any}', actual: '{any}'", .{ i, expected, actual });
-            try utils.testing.expectEqualDeepWithOverrides(expected, actual, compare_ctx);
+            try testing.expectEqualDeepWithOverrides(expected, actual, compare_ctx);
         }
         try std.testing.expectEqual(0, encoded_reader.bufferedLen());
     }
