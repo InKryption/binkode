@@ -1299,21 +1299,26 @@ pub fn StdCodec(comptime V: type) type {
             });
         }
 
-        pub const ArrayListElem = switch (@typeInfo(V)) {
+        pub const ArrayListSlice = switch (@typeInfo(V)) {
             .@"struct" => blk: {
                 if (!@hasDecl(V, "Slice")) break :blk noreturn;
                 if (@TypeOf(&V.Slice) != *const type) break :blk noreturn;
-                const ptr_info = switch (@typeInfo(V.Slice)) {
+                const Slice = V.Slice;
+                const ptr_info = switch (@typeInfo(Slice)) {
                     .pointer => |ptr_info| ptr_info,
                     else => break :blk noreturn,
                 };
                 if (ptr_info.size != .slice) break :blk noreturn;
-                const Expected = std.ArrayListAlignedUnmanaged(ptr_info.child, .fromByteUnits(ptr_info.alignment));
+                const Expected = std.array_list.Aligned(
+                    ptr_info.child,
+                    .fromByteUnits(ptr_info.alignment),
+                );
                 if (V != Expected) break :blk noreturn;
-                break :blk ptr_info.child;
+                break :blk Slice;
             },
             else => noreturn,
         };
+        const ArrayListElem = @typeInfo(ArrayListSlice).pointer.child;
 
         /// Standard codec for an arraylist.
         /// Requires allocation, for the arraylist, and possibly for the elements (based on element codec).
@@ -1328,23 +1333,23 @@ pub fn StdCodec(comptime V: type) type {
         pub fn arrayList(element: StdCodec(ArrayListElem)) StdCodecSelf {
             const alignment: std.mem.Alignment =
                 .fromByteUnits(@typeInfo(V.Slice).pointer.alignment);
-            const ArrayListType = std.ArrayListAlignedUnmanaged(ArrayListElem, alignment);
+            const ArrayList = std.array_list.Aligned(ArrayListElem, alignment);
             const EncodeCtx = element.codec.EncodeCtx;
             const DecodeCtx = element.codec.DecodeCtx;
             return .implement(EncodeCtx, DecodeCtx, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
                     config: bk.Config,
-                    value: *const ArrayListType,
+                    value: *const ArrayList,
                     ctx: EncodeCtx,
                 ) bk.EncodeWriterError!void {
-                    const slice_codec: StdCodec(ArrayListType.Slice) = .slice(element);
+                    const slice_codec: StdCodec(ArrayList.Slice) = .slice(element);
                     try slice_codec.codec.encode(writer, config, &value.items, ctx);
                 }
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
-                    values: []ArrayListType,
+                    values: []ArrayList,
                     _: DecodeCtx,
                 ) std.mem.Allocator.Error!void {
                     _ = gpa_opt.?;
@@ -1355,7 +1360,7 @@ pub fn StdCodec(comptime V: type) type {
                     reader: *std.Io.Reader,
                     config: bk.Config,
                     gpa_opt: ?std.mem.Allocator,
-                    value: *ArrayListType,
+                    value: *ArrayList,
                     ctx: DecodeCtx,
                 ) bk.DecodeReaderError!void {
                     const gpa = gpa_opt.?;
@@ -1384,7 +1389,7 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const ArrayListType,
+                    value: *const ArrayList,
                     ctx: DecodeCtx,
                 ) void {
                     const gpa = gpa_opt.?;

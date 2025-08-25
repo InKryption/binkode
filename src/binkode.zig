@@ -51,7 +51,6 @@ pub const DecodeSliceError = DecodeError || std.mem.Allocator.Error || error{End
 /// the overhead of runtime dispatch.
 /// Includes type fields for specifying additional context at runtime if necessary.
 pub fn Codec(comptime V: type) type {
-    if (V == noreturn) unreachable;
     return struct {
         /// The type of the context consumed by `encodeFn`.
         EncodeCtx: type,
