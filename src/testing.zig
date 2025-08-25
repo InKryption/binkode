@@ -9,9 +9,9 @@ pub fn expectEqualDeepWithOverrides(
     ///   to fall back to default handling of comparison.
     compare_ctx: anytype,
 ) !void {
-    var sub_accesses: std.ArrayListUnmanaged(SubAccess) = .{};
+    var sub_accesses: std.ArrayList(SubAccess) = .{};
     defer sub_accesses.deinit(std.testing.allocator);
-    errdefer testPrint("Difference occurs at `expected`{f}", .{
+    errdefer testPrint("Difference occurs at `expected{f}`", .{
         SubAccess.suffixListFmt(sub_accesses.items),
     });
     expectEqualDeepWithOverridesImpl(
@@ -51,7 +51,7 @@ const SubAccess = union(enum) {
 fn expectEqualDeepWithOverridesImpl(
     expected: anytype,
     actual: anytype,
-    sub_accesses: *std.ArrayListUnmanaged(SubAccess),
+    sub_accesses: *std.ArrayList(SubAccess),
     /// Expects methods:
     /// * `fn compare(expected: anytype, actual: @TypeOf(expected)) !bool`:
     ///   Should return true if the values were compared, and otherwise false
