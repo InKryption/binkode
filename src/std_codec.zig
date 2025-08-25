@@ -1199,7 +1199,10 @@ pub fn StdCodec(comptime V: type) type {
             const ptr_info = @typeInfo(V).pointer;
             comptime {
                 if (ptr_info.size != .one or @typeInfo(ptr_info.child) != .array) @compileError(
-                    "array ptr codec is not implemented for type " ++ @typeName(V),
+                    "byte array ptr codec is not implemented for type " ++ @typeName(V),
+                );
+                if (Element != u8) @compileError(
+                    "byte array ptr codec is not implemented for type " ++ @typeName(V),
                 );
             }
 
@@ -1774,7 +1777,7 @@ inline fn encStrLit(comptime config: bk.Config, comptime str: []const u8) []cons
     comptime return encIntLit(config, @as(usize, str.len)) ++ str;
 }
 
-test "standard void" {
+test "empty" {
     var null_reader: std.Io.Reader = .failing;
     var null_writer: std.Io.Writer.Discarding = .init(&.{});
     const void_codec: bk.Codec(void) = .standard(.empty);
@@ -1783,7 +1786,7 @@ test "standard void" {
     try std.testing.expectEqual(0, void_codec.encodedSize(.default, &{}, {}));
 }
 
-test "standard byte" {
+test "byte" {
     const byte_codec: bk.Codec(u8) = .standard(.byte);
     try std.testing.expectEqual('f', byte_codec.decodeSliceExact(&.{'f'}, null, .default, {}));
     try std.testing.expectEqual('o', byte_codec.decodeSliceExact(&.{'o'}, null, .default, {}));
@@ -1793,7 +1796,7 @@ test "standard byte" {
     try std.testing.expectEqual(1, byte_codec.encodedSize(.default, &'z', {}));
 }
 
-test "standard bool" {
+test "bool" {
     const bool_codec: bk.Codec(bool) = .standard(.boolean);
     try std.testing.expectEqual(false, bool_codec.decodeSliceExact(&.{0}, null, .default, null));
     try std.testing.expectEqual(true, bool_codec.decodeSliceExact(&.{1}, null, .default, null));
@@ -1808,7 +1811,7 @@ test "standard bool" {
     try std.testing.expectEqual(1, bool_codec.encodedSize(.default, &true, {}));
 }
 
-test "standard int" {
+test "int" {
     try testEncodedBytesAndRoundTrip(u32, .standard(.int), .{
         .config = .cfg(.little, .varint),
         .enc_ctx = {},
@@ -1859,7 +1862,7 @@ test "standard int" {
     try testCodecRoundTrips(usize, .standard(.int), {}, null, &intTestEdgeCases(usize) ++ .{ 1, 5, 1000000000, 32, 8 });
 }
 
-test "standard float" {
+test "float" {
     try testCodecRoundTrips(f32, .standard(.float), {}, {}, &.{ 1, 5, 10000, 32, 8 });
     try testCodecRoundTrips(f32, .standard(.float), {}, {}, &.{ 1, 5, 1000000000, 32, 8 });
     try testCodecRoundTrips(f64, .standard(.float), {}, {}, &.{ 1, 5, 10000, 32, 8 });
@@ -1868,7 +1871,7 @@ test "standard float" {
     try testCodecRoundTrips(f64, .standard(.float), {}, {}, &floatTestEdgeCases(f64));
 }
 
-test "standard utf8_codepoint" {
+test "utf8_codepoint" {
     try std.testing.expectEqual(1, bk.Codec(u32).standard(.utf8_codepoint).encodedSize(.default, &'\u{7F}', {}));
     try std.testing.expectEqual(2, bk.Codec(u32).standard(.utf8_codepoint).encodedSize(.default, &'\u{ff}', {}));
     try std.testing.expectEqual(3, bk.Codec(u32).standard(.utf8_codepoint).encodedSize(.default, &'\u{fff}', {}));
@@ -1889,7 +1892,7 @@ test "standard utf8_codepoint" {
     try testCodecRoundTrips(u21, .standard(.utf8_codepoint), {}, {}, &.{ '\u{2100}', '\u{3100}', '\u{FFAAA}', '\u{FFFFF}', '\u{FFFFF}' });
 }
 
-test "standard optional" {
+test "optional" {
     try testCodecRoundTrips(?void, .standard(.optional(.empty)), {}, null, &.{ null, {}, null, {}, null, {} });
     try testCodecRoundTrips(?bool, .standard(.optional(.boolean)), {}, null, &.{
         null, false, null, true, null, true,
@@ -1922,7 +1925,7 @@ test "standard optional" {
     });
 }
 
-test "standard tuple" {
+test "tuple" {
     const S = struct {
         a: u32,
         b: f64,
@@ -1955,7 +1958,7 @@ test "standard tuple" {
     });
 }
 
-test "standard taggedUnion" {
+test "taggedUnion" {
     const U = union(enum) {
         void,
         char: u8,
@@ -1989,11 +1992,11 @@ test "standard taggedUnion" {
     });
 }
 
-test "standard byte_array" {
+test "byte_array" {
     try testCodecRoundTrips([3]u8, .standard(.byte_array), {}, {}, &.{ "foo".*, "bar".*, "baz".* });
 }
 
-test "standard array" {
+test "array" {
     try testCodecRoundTrips([2]u64, .standard(.array(.int)), {}, null, @ptrCast(&intTestEdgeCases(u64) ++ intTestEdgeCases(u64)));
     try testCodecRoundTrips([2]u64, .standard(.array(.int)), {}, null, &.{
         .{ 1, 2 },
@@ -2010,20 +2013,20 @@ test "standard array" {
     });
 }
 
-test "standard singleItemPtr" {
+test "singleItemPtr" {
     try testCodecRoundTrips(*const u32, .standard(.singleItemPtr(.int)), {}, null, &.{
         &0, &1, &2, &10000, &std.math.maxInt(u32),
     });
 }
 
-test "standard byte_slice" {
+test "byte_slice" {
     try testCodecRoundTrips([]const u8, .standard(.byte_slice), {}, {}, &.{
         &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }, "foo",  "bar",  "baz",
         &.{ 127, std.math.maxInt(u8) },  "fizz", "buzz", "fizzbuzz",
     });
 }
 
-test "standard slice" {
+test "slice" {
     try testCodecRoundTrips([]const u32, .standard(.slice(.int)), {}, null, &.{
         &.{ 0, 1, 2 },
         &.{ 3, 4, 5, 6 },
@@ -2034,7 +2037,7 @@ test "standard slice" {
     });
 }
 
-test "standard byte_array_ptr" {
+test "byte_array_ptr" {
     try testCodecRoundTrips(*const [3]u8, .standard(.byte_array_ptr), {}, {}, &.{
         "foo",
         "bar",
@@ -2048,7 +2051,7 @@ test "standard byte_array_ptr" {
     });
 }
 
-test "standard arrayPtr" {
+test "arrayPtr" {
     try testCodecRoundTrips(*const [3]u32, .standard(.arrayPtr(.int)), {}, null, &.{
         &.{ 0, 1, 2 },
         &.{ 3, 4, 5 },
@@ -2059,7 +2062,7 @@ test "standard arrayPtr" {
     });
 }
 
-test "standard arrayList" {
+test "arrayList" {
     const gpa = std.testing.allocator;
 
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -2104,27 +2107,15 @@ test "standard arrayList" {
     try std.testing.expectEqualDeep(&[_][]const u8{ "fizz", "buzz" }, list.items);
 }
 
-test "standard arrayHashMap" {
+test "arrayHashMap" {
     const gpa = std.testing.allocator;
 
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const compare_ctx = struct {
-        pub fn compare(expected: anytype, actual: anytype) !bool {
-            const T = @TypeOf(expected, actual);
-            if (bk.std_reflect.ArrayHashMapInfo.from(T) != null) {
-                try testing.expectEqualDeepWithOverrides(expected.keys(), actual.keys(), @This());
-                try testing.expectEqualDeepWithOverrides(expected.values(), actual.values(), @This());
-                return true;
-            }
-            return false;
-        }
-    };
-
     const MapU32U32 = std.AutoArrayHashMapUnmanaged(u32, u32);
-    try testCodecRoundTripsInner(
+    try testCodecRoundTrips(
         MapU32U32,
         .standard(.arrayHashMap(.int, .int)),
         {},
@@ -2134,25 +2125,19 @@ test "standard arrayHashMap" {
             try initArrayHashMap(arena, MapU32U32, &.{ .{ 1, 2 }, .{ 3, 4 } }),
             try initArrayHashMap(arena, MapU32U32, &.{ .{ 5, 6 }, .{ 7, 8 }, .{ 9, 10 } }),
         },
-        compare_ctx,
     );
 
     const MapStrU16 = std.StringArrayHashMapUnmanaged(u16);
     const lev: bk.Config = comptime .cfg(.little, .varint);
-    try testEncodedBytesAndRoundTripInner(
-        MapStrU16,
-        .standard(.arrayHashMap(.byte_slice, .int)),
-        .{
-            .config = lev,
-            .enc_ctx = {},
-            .dec_ctx = null,
-            .original = try initArrayHashMap(arena, MapStrU16, &.{ .{ "foo", 2 }, .{ "bar", 4 } }),
-            .expected_bytes = encIntLit(lev, 2) ++
-                (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
-                (encStrLit(lev, "bar") ++ encIntLit(lev, 4)),
-        },
-        compare_ctx,
-    );
+    try testEncodedBytesAndRoundTrip(MapStrU16, .standard(.arrayHashMap(.byte_slice, .int)), .{
+        .config = lev,
+        .enc_ctx = {},
+        .dec_ctx = null,
+        .original = try initArrayHashMap(arena, MapStrU16, &.{ .{ "foo", 2 }, .{ "bar", 4 } }),
+        .expected_bytes = encIntLit(lev, 2) ++
+            (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
+            (encStrLit(lev, "bar") ++ encIntLit(lev, 4)),
+    });
 
     var list: MapStrU16 = .empty;
     defer list.deinit(gpa);
@@ -2373,11 +2358,7 @@ fn testEncodedBytesAndRoundTrip(
     codec: bk.Codec(T),
     params: TestEncodedBytesAndRoundTripParams(T, codec),
 ) !void {
-    try testEncodedBytesAndRoundTripInner(T, codec, params, struct {
-        pub fn compare(_: anytype, _: anytype) !bool {
-            return false;
-        }
-    });
+    try testEncodedBytesAndRoundTripInner(T, codec, params, std_compare_ctx);
 }
 
 fn testEncodedBytesAndRoundTripInner(
@@ -2405,23 +2386,19 @@ fn testEncodedBytesAndRoundTripInner(
 }
 
 fn testCodecRoundTrips(
-    comptime T: type,
-    codec: bk.Codec(T),
+    comptime V: type,
+    codec: bk.Codec(V),
     enc_ctx: codec.EncodeCtx,
     dec_ctx: codec.DecodeCtx,
-    values: []const T,
+    values: []const V,
 ) !void {
     try testCodecRoundTripsInner(
-        T,
+        V,
         codec,
         enc_ctx,
         dec_ctx,
         values,
-        struct {
-            pub fn compare(_: anytype, _: anytype) !bool {
-                return false;
-            }
-        },
+        std_compare_ctx,
     );
 }
 
@@ -2472,3 +2449,19 @@ fn testCodecRoundTripsInner(
         try std.testing.expectEqual(0, encoded_reader.bufferedLen());
     }
 }
+
+const std_compare_ctx = struct {
+    pub fn compare(expected: anytype, actual: anytype) !bool {
+        const T = @TypeOf(expected, actual);
+        if (bk.std_reflect.ArrayListInfo.from(T) != null) {
+            try std.testing.expectEqualDeep(expected.items, actual.items);
+            return true;
+        }
+        if (bk.std_reflect.ArrayHashMapInfo.from(T) != null) {
+            try testing.expectEqualDeepWithOverrides(expected.keys(), actual.keys(), @This());
+            try testing.expectEqualDeepWithOverrides(expected.values(), actual.values(), @This());
+            return true;
+        }
+        return false;
+    }
+};
