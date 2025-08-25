@@ -62,11 +62,12 @@ pub fn Codec(comptime V: type) type {
         /// The type of the context consumed by `encodeFn`.
         EncodeCtx: type,
 
-        /// Encodes `value.*` to the `writer` stream in a manner defined by the implementation.
+        /// Encodes all `values[i]` to the `writer` stream sequentially, in a manner defined by the implementation.
+        /// The implementation should treat each `values[i]` as independent from all other `values[j]`.
         encodeFn: fn (
             writer: *std.Io.Writer,
             config: Config,
-            value: *const V,
+            values: []const V,
             /// Must point to a value of type `EncodeCtx`.
             ctx_ptr: *const anyopaque,
         ) EncodeWriterError!void,
@@ -138,7 +139,18 @@ pub fn Codec(comptime V: type) type {
             value: *const V,
             ctx: self.EncodeCtx,
         ) EncodeWriterError!void {
-            return self.encodeFn(writer, config, value, @ptrCast(&ctx));
+            return self.encodeMany(writer, config, @ptrCast(value), ctx);
+        }
+
+        /// Encodes each `values[i]` to the `writer` stream sequentially.
+        pub fn encodeMany(
+            self: CodecSelf,
+            writer: *std.Io.Writer,
+            config: Config,
+            values: []const V,
+            ctx: self.EncodeCtx,
+        ) EncodeWriterError!void {
+            return self.encodeFn(writer, config, values, @ptrCast(&ctx));
         }
 
         /// Returns the number of bytes occupied by the encoded representation of `value.*`.
@@ -365,7 +377,7 @@ pub fn Codec(comptime V: type) type {
 
         /// Expects `methods` to be a namespace with the following methods defined:
         /// ```zig
-        /// fn encode(writer: *std.Io.Writer, config: Config, gpa_opt: ?std.mem.Allocator, value: *const V, ctx: EncodeCtx) EncodeWriterError!void { ... }
+        /// fn encode(writer: *std.Io.Writer, config: Config, gpa_opt: ?std.mem.Allocator, values: []const V, ctx: EncodeCtx) EncodeWriterError!void { ... }
         /// fn decodeInit(gpa_opt: ?std.mem.Allocator, values: []V, ctx: DecodeCtx) std.mem.Allocator.Error!void { ... }
         /// fn decode(reader: *std.Io.Reader, config: Config, gpa_opt: ?std.mem.Allocator, value: *V, ctx: DecodeCtx) DecodeReaderError!void { ... }
         /// fn free(gpa_opt: ?std.mem.Allocator, value: *const V, ctx: DecodeCtx) void { ... }
@@ -389,7 +401,7 @@ pub fn Codec(comptime V: type) type {
 
         /// Expects `methods` to be a namespace with the following methods defined:
         /// ```zig
-        /// fn encode(writer: *std.Io.Writer, config: Config, gpa_opt: ?std.mem.Allocator, value: *const V, ctx: EncodeCtx) EncodeWriterError!void { ... }
+        /// fn encode(writer: *std.Io.Writer, config: Config, gpa_opt: ?std.mem.Allocator, values: []const V, ctx: EncodeCtx) EncodeWriterError!void { ... }
         /// fn decodeInit(gpa_opt: ?std.mem.Allocator, values: []V, ctx: DecodeCtx) std.mem.Allocator.Error!void { ... }
         /// fn decode(reader: *std.Io.Reader, config: Config, gpa_opt: ?std.mem.Allocator, value: *V, ctx: DecodeCtx) DecodeReaderError!void { ... }
         /// fn free(gpa_opt: ?std.mem.Allocator, value: *const V, ctx: DecodeCtx) void { ... }
@@ -403,11 +415,11 @@ pub fn Codec(comptime V: type) type {
                 pub fn encode(
                     writer: *std.Io.Writer,
                     config: Config,
-                    value: *const V,
+                    values: []const V,
                     ctx_ptr: *const anyopaque,
                 ) EncodeWriterError!void {
                     const ctx: *const EncodeCtx = @ptrCast(@alignCast(ctx_ptr));
-                    try methods.encode(writer, config, value, ctx.*);
+                    try methods.encode(writer, config, values, ctx.*);
                 }
 
                 pub fn decodeInit(
