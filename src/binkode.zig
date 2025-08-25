@@ -5,9 +5,12 @@ pub const varint = @import("varint.zig");
 const std_codec = @import("std_codec.zig");
 pub const StdCodec = std_codec.StdCodec;
 
+pub const std_reflect = @import("std_reflect.zig");
+
 comptime {
     _ = varint;
     _ = std_codec;
+    _ = std_reflect;
 }
 
 pub const IntEncoding = enum {
