@@ -100,7 +100,7 @@ pub fn Codec(comptime V: type) type {
             ctx_ptr: *const anyopaque,
         ) std.mem.Allocator.Error!void,
 
-        /// Decodes into `value.*` from the `reader` stream.
+        /// Decodes into all `values[i]` from the `reader` stream sequentially.
         decodeFn: fn (
             reader: *std.Io.Reader,
             gpa_opt: ?std.mem.Allocator,
@@ -111,9 +111,16 @@ pub fn Codec(comptime V: type) type {
             /// If `decodeInitFn != null`, expected to either have been initialized
             /// by `decodeInitFn`, or otherwise to be conformant with the documented
             /// expectations of the implementation. Consult with the documentation
-            /// of the implementation to learn about the state of `value.*` in the
+            /// of the implementation to learn about the state of `values[i]` in the
             /// case of an error during `decode`.
-            value: *V,
+            values: []V,
+            /// In the event that this function returns an error, this value must be set
+            /// to the index such that `values[0..values_valid_count.*]` represents the
+            /// slice of all decoded elements which are in a defined state despite the
+            /// error. They can be valid either because they were decoded correctly, or
+            /// because they were, or were expected to be, set to a sane initial state
+            /// that can be passed to `freeFn`.
+            values_valid_count: *usize,
             /// Must point to a value of type `DecodeCtx`.
             ctx_ptr: *const anyopaque,
         ) DecodeReaderError!void,
@@ -233,7 +240,7 @@ pub fn Codec(comptime V: type) type {
                 self.free(gpa_opt, &value, ctx);
             };
 
-            try self.decodeInto(reader, gpa_opt, config, &value, ctx);
+            try self.decodeOne(reader, gpa_opt, config, &value, ctx);
             return value;
         }
 
@@ -318,7 +325,7 @@ pub fn Codec(comptime V: type) type {
         ///
         /// See doc comment on `decodeInitFn` for commentary on the expected
         /// initial state of `value.*`.
-        pub fn decodeInto(
+        pub fn decodeOne(
             self: CodecSelf,
             reader: *std.Io.Reader,
             gpa_opt: ?std.mem.Allocator,
@@ -326,7 +333,19 @@ pub fn Codec(comptime V: type) type {
             value: *V,
             ctx: self.DecodeCtx,
         ) DecodeReaderError!void {
-            return self.decodeFn(reader, gpa_opt, config, value, @ptrCast(&ctx));
+            return self.decodeMany(reader, gpa_opt, config, @ptrCast(value), ctx);
+        }
+
+        /// TODO: doc comment
+        pub fn decodeMany(
+            self: CodecSelf,
+            reader: *std.Io.Reader,
+            gpa_opt: ?std.mem.Allocator,
+            config: Config,
+            values: []V,
+            ctx: self.DecodeCtx,
+        ) DecodeReaderError!void {
+            return self.decodeFn(reader, gpa_opt, config, values, @ptrCast(&ctx));
         }
 
         /// Same as `decodeInto`, but takes a slice directly as input.
@@ -340,7 +359,7 @@ pub fn Codec(comptime V: type) type {
             ctx: self.DecodeCtx,
         ) DecodeSliceError!usize {
             var reader: std.Io.Reader = .fixed(src);
-            self.decodeInto(&reader, gpa_opt, config, value, ctx) catch |err| switch (err) {
+            self.decodeOne(&reader, gpa_opt, config, value, ctx) catch |err| switch (err) {
                 error.DecodeFailed => |e| return e,
                 error.OutOfMemory => |e| return e,
                 error.EndOfStream => |e| return e,
@@ -435,11 +454,11 @@ pub fn Codec(comptime V: type) type {
                     reader: *std.Io.Reader,
                     gpa_opt: ?std.mem.Allocator,
                     config: Config,
-                    value: *V,
+                    values: []V,
                     ctx_ptr: *const anyopaque,
                 ) DecodeReaderError!void {
                     const ctx: *const DecodeCtx = @ptrCast(@alignCast(ctx_ptr));
-                    try methods.decode(reader, config, gpa_opt, value, ctx.*);
+                    try methods.decode(reader, config, gpa_opt, values, ctx.*);
                 }
 
                 pub fn free(
