@@ -69,8 +69,8 @@ pub fn Codec(comptime V: type) type {
             writer: *std.Io.Writer,
             config: Config,
             values: []const V,
-            /// Must point to a value of type `EncodeCtx`.
-            ctx_ptr: *const anyopaque,
+            /// Must be a value of type `EncodeCtx`.
+            ctx: anytype,
         ) EncodeToWriterError!void,
 
         /// The type of the context consumed by `decodeInitFn`, `decodeFn`, and `freeFn`.
@@ -97,8 +97,8 @@ pub fn Codec(comptime V: type) type {
             /// Should be assumed to be undefined by the implementation, which should set
             /// it to a valid initial state for `decodeFn` to consume and decode into.
             values: []V,
-            /// Must point to a value of type `DecodeCtx`.
-            ctx_ptr: *const anyopaque,
+            /// Must be a value of type `DecodeCtx`.
+            ctx: anytype,
         ) std.mem.Allocator.Error!void,
 
         /// Decodes into `value.*` from the `reader` stream.
@@ -114,8 +114,8 @@ pub fn Codec(comptime V: type) type {
             /// of the implementation to learn about the state of `value.*` in the
             /// case of an error during `decode`.
             value: *V,
-            /// Must point to a value of type `DecodeCtx`.
-            ctx_ptr: *const anyopaque,
+            /// Must be a value of type `DecodeCtx`.
+            ctx: anytype,
         ) DecodeFromReaderError!void,
 
         /// Frees any of the resources held by `value.*`.
@@ -127,8 +127,8 @@ pub fn Codec(comptime V: type) type {
         freeFn: ?fn (
             gpa_opt: ?std.mem.Allocator,
             value: *const V,
-            /// Must point to a value of type `DecodeCtx`.
-            ctx_ptr: *const anyopaque,
+            /// Must be a value of type `DecodeCtx`.
+            ctx: anytype,
         ) void,
         const CodecSelf = @This();
 
@@ -151,7 +151,7 @@ pub fn Codec(comptime V: type) type {
             values: []const V,
             ctx: self.EncodeCtx,
         ) EncodeToWriterError!void {
-            return self.encodeFn(writer, config, values, @ptrCast(&ctx));
+            return self.encodeFn(writer, config, values, ctx);
         }
 
         /// Returns the number of bytes occupied by the encoded representation of `value.*`.
@@ -312,7 +312,7 @@ pub fn Codec(comptime V: type) type {
             ctx: self.DecodeCtx,
         ) std.mem.Allocator.Error!void {
             const decodeInitFn = self.decodeInitFn orelse return;
-            return try decodeInitFn(gpa_opt, values, @ptrCast(&ctx));
+            return try decodeInitFn(gpa_opt, values, ctx);
         }
 
         /// Decodes into `value.*` from the `reader` stream.
@@ -330,7 +330,7 @@ pub fn Codec(comptime V: type) type {
             value: *V,
             ctx: self.DecodeCtx,
         ) DecodeFromReaderError!void {
-            return self.decodeFn(reader, gpa_opt, config, value, @ptrCast(&ctx));
+            return self.decodeFn(reader, gpa_opt, config, value, ctx);
         }
 
         /// Same as `decodeInto`, but takes a slice directly as input.
@@ -364,11 +364,7 @@ pub fn Codec(comptime V: type) type {
             ctx: self.DecodeCtx,
         ) void {
             const freeFn = self.freeFn orelse return;
-            return freeFn(
-                gpa_opt,
-                value,
-                @ptrCast(&ctx),
-            );
+            return freeFn(gpa_opt, value, ctx);
         }
 
         /// Construct a codec from a composition of standard codecs for an assortment of types,
@@ -420,19 +416,23 @@ pub fn Codec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: Config,
                     values: []const V,
-                    ctx_ptr: *const anyopaque,
+                    ctx: anytype,
                 ) EncodeToWriterError!void {
-                    const ctx: *const EncodeCtx = @ptrCast(@alignCast(ctx_ptr));
-                    try methods.encode(writer, config, values, ctx.*);
+                    if (@TypeOf(ctx) != EncodeCtx) @compileError(
+                        "Expected type " ++ @typeName(EncodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
+                    );
+                    try methods.encode(writer, config, values, ctx);
                 }
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
                     values: []V,
-                    ctx_ptr: *const anyopaque,
+                    ctx: anytype,
                 ) std.mem.Allocator.Error!void {
-                    const ctx: *const DecodeCtx = @ptrCast(@alignCast(ctx_ptr));
-                    try methods.decodeInit(gpa_opt, values, ctx.*);
+                    if (@TypeOf(ctx) != DecodeCtx) @compileError(
+                        "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
+                    );
+                    try methods.decodeInit(gpa_opt, values, ctx);
                 }
 
                 pub fn decode(
@@ -440,19 +440,23 @@ pub fn Codec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     config: Config,
                     value: *V,
-                    ctx_ptr: *const anyopaque,
+                    ctx: anytype,
                 ) DecodeFromReaderError!void {
-                    const ctx: *const DecodeCtx = @ptrCast(@alignCast(ctx_ptr));
-                    try methods.decode(reader, config, gpa_opt, value, ctx.*);
+                    if (@TypeOf(ctx) != DecodeCtx) @compileError(
+                        "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
+                    );
+                    try methods.decode(reader, config, gpa_opt, value, ctx);
                 }
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
                     value: *const V,
-                    ctx_ptr: *const anyopaque,
+                    ctx: anytype,
                 ) void {
-                    const ctx: *const DecodeCtx = @ptrCast(@alignCast(ctx_ptr));
-                    methods.free(gpa_opt, value, ctx.*);
+                    if (@TypeOf(ctx) != DecodeCtx) @compileError(
+                        "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
+                    );
+                    methods.free(gpa_opt, value, ctx);
                 }
             };
         }
