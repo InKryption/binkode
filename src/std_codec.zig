@@ -656,7 +656,6 @@ pub fn StdCodec(comptime V: type) type {
             /// to, permitting `decode` to assume the `value` pointer is valid and initialized,
             /// and can be decoded into in-place, with the semantics of doing so for each variant
             /// being defined by the respective codec in `payload_codecs`.
-            /// It should also be noted that under this configuration, if the decoded TODO
             ///
             /// If null, decode's initial state is write-only, since it cannot be assumed
             /// that the union is properly initialized.
