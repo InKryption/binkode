@@ -32,7 +32,7 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 ctx: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 _ = ctx;
                 _ = writer;
                 _ = config;
@@ -47,7 +47,7 @@ pub fn StdCodec(comptime V: type) type {
                 gpa_opt: ?std.mem.Allocator,
                 value: *V,
                 ctx: void,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 _ = ctx;
                 _ = reader;
                 _ = config;
@@ -66,7 +66,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: bk.Config,
                 values: []const u8,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 try writer.writeAll(values);
             }
 
@@ -78,7 +78,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: ?std.mem.Allocator,
                 value: *u8,
                 _: void,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 try reader.readSliceAll(value[0..1]);
             }
 
@@ -103,7 +103,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: bk.Config,
                 values: []const bool,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 comptime if (@sizeOf(bool) != @sizeOf(u8)) unreachable;
                 try writer.writeAll(@ptrCast(values));
             }
@@ -116,7 +116,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: ?std.mem.Allocator,
                 value: *bool,
                 maybe_diag: ?*BoolDecodeDiag,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 var real_byte: u8 = undefined;
                 try reader.readSliceAll((&real_byte)[0..1]);
                 value.* = switch (real_byte) {
@@ -180,7 +180,7 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 switch (config.int) {
                     .fixint => {
                         try writer.writeSliceEndian(V, values, config.endian);
@@ -207,7 +207,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: ?std.mem.Allocator,
                 value: *V,
                 maybe_diag: ?*IntDecodeDiag,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 switch (config.int) {
                     .fixint => {
                         var int_bytes: [@sizeOf(Int)]u8 = undefined;
@@ -268,7 +268,7 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 try writer.writeSliceEndian(AsInt, @ptrCast(values), config.endian);
             }
 
@@ -280,7 +280,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: ?std.mem.Allocator,
                 value: *V,
                 _: void,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 try reader.readSliceAll(@ptrCast(value));
                 value.* = @bitCast(std.mem.nativeTo(AsInt, @bitCast(value.*), config.endian));
             }
@@ -306,7 +306,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 switch (V) {
                     u1, u2, u3, u4, u5, u6, u7 => |ByteSized| {
                         comptime if (@sizeOf(ByteSized) != @sizeOf(u8)) unreachable;
@@ -345,7 +345,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: ?std.mem.Allocator,
                 value: *V,
                 _: void,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 const first_byte = first_byte: {
                     var first_byte: u8 = undefined;
                     try reader.readSliceAll((&first_byte)[0..1]);
@@ -419,7 +419,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     for (values) |*value| {
                         boolean.codec.encode(writer, config, &(value.* != null), ctx) catch |err| switch (err) {
                             error.WriteFailed => |e| return e,
@@ -445,7 +445,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
                     maybe_ctx: DecodeCtxParam,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     const ctx: DecodeCtx = ctx: {
                         if (!decode_ctx_opt) break :ctx maybe_ctx;
                         break :ctx maybe_ctx orelse .{
@@ -524,7 +524,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     for (values) |*value| {
                         inline for (s_fields) |s_field| {
                             const field: StdCodec(s_field.type) = @field(field_codecs, s_field.name);
@@ -562,7 +562,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
                     ctx: DecodeCtx,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     inline for (s_fields, 0..) |s_field, i| {
                         errdefer freeFieldSubset(i, gpa_opt, value, ctx);
                         const field: StdCodec(s_field.type) = @field(field_codecs, s_field.name);
@@ -690,7 +690,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     maybe_ctx: EncodeCtx,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     for (values) |*value| {
                         const current_tag: union_info.tag_type.? = value.*;
                         try std_tag.codec.encode(writer, config, &current_tag, {});
@@ -744,7 +744,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
                     maybe_ctx: DecodeCtxParam,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     const valid_init_state = comptime decode_init_tag_opt != null;
                     const ctx: DecodeCtx = unwrapMaybeCtx(maybe_ctx);
                     switch (try std_tag.codec.decode(reader, null, config, ctx.diag)) {
@@ -874,7 +874,7 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 if (@sizeOf(enum_info.tag_type) == @sizeOf(u32)) {
                     try u32_codec.encodeMany(writer, config, @ptrCast(values), {});
                 } else {
@@ -893,7 +893,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: ?std.mem.Allocator,
                 value: *V,
                 maybe_diag: ?*DiscriminantDecodeCtx,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 const as_u32 = try u32_codec.decode(reader, null, config, null);
                 if (as_u32 > std.math.maxInt(enum_info.tag_type)) {
                     if (maybe_diag) |diag| diag.real_int = as_u32;
@@ -929,7 +929,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 try writer.writeAll(@ptrCast(values)); // flatten `[]const [n]u8` as `[]const u8`
             }
 
@@ -941,7 +941,7 @@ pub fn StdCodec(comptime V: type) type {
                 _: ?std.mem.Allocator,
                 value: *V,
                 _: void,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 try reader.readSliceAll(value);
             }
 
@@ -963,7 +963,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     switch (@typeInfo(V)) {
                         .array => try element.codec.encodeMany(writer, config, @ptrCast(values), ctx), // flatten `[]const [n]E` as `[]const E`
                         .vector => |vec_info| for (values) |*value| {
@@ -996,7 +996,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
                     ctx: DecodeCtx,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     switch (@typeInfo(V)) {
                         .array => for (value) |*elem| try element.codec.decodeInto(reader, gpa_opt, config, elem, ctx),
                         .vector => |vec_info| for (0..vec_info.len) |i| try element.codec.decodeInto(reader, gpa_opt, config, &value[i], ctx),
@@ -1054,7 +1054,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     for (values) |value| {
                         try child.codec.encode(writer, config, value, ctx);
                     }
@@ -1068,7 +1068,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
                     ctx: DecodeCtx,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     const gpa = gpa_opt.?;
                     const aligned_bytes = try gpa.alignedAlloc(
                         u8,
@@ -1118,7 +1118,7 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 for (values) |value| {
                     try length.codec.encode(writer, config, &value.len, {});
                     try writer.writeAll(value);
@@ -1140,7 +1140,7 @@ pub fn StdCodec(comptime V: type) type {
                 gpa_opt: ?std.mem.Allocator,
                 value: *V,
                 _: void,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 const gpa = gpa_opt.?;
 
                 const len = try length.codec.decode(reader, null, config, null);
@@ -1187,7 +1187,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     for (values) |value| {
                         try length.codec.encode(writer, config, &value.len, {});
                         try element.codec.encodeMany(writer, config, value, ctx);
@@ -1202,7 +1202,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
                     ctx: DecodeCtx,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     const gpa = gpa_opt.?;
 
                     const len = try length.codec.decode(reader, null, config, null);
@@ -1250,7 +1250,7 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 for (values) |value| {
                     try length.codec.encode(writer, config, &value.len, {});
                     try writer.writeAll(value);
@@ -1265,7 +1265,7 @@ pub fn StdCodec(comptime V: type) type {
                 gpa_opt: ?std.mem.Allocator,
                 value: *V,
                 _: void,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 const gpa = gpa_opt.?;
 
                 const expected_len = @typeInfo(ptr_info.child).array.len;
@@ -1309,7 +1309,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     for (values) |value| {
                         try length.codec.encode(writer, config, &value.len, ctx);
                         try std_array.codec.encode(writer, config, value, ctx);
@@ -1324,7 +1324,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *V,
                     ctx: DecodeCtx,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     const gpa = gpa_opt.?;
 
                     const expected_len = @typeInfo(ptr_info.child).array.len;
@@ -1366,7 +1366,7 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const ArrayList,
                 _: void,
-            ) bk.EncodeWriterError!void {
+            ) bk.EncodeToWriterError!void {
                 for (values) |value| {
                     try length.codec.encode(writer, config, &value.items.len, {});
                     try writer.writeAll(value.items);
@@ -1388,7 +1388,7 @@ pub fn StdCodec(comptime V: type) type {
                 gpa_opt: ?std.mem.Allocator,
                 value: *ArrayList,
                 _: void,
-            ) bk.DecodeReaderError!void {
+            ) bk.DecodeFromReaderError!void {
                 const gpa = gpa_opt.?;
                 const len = try length.codec.decode(reader, null, config, null);
                 try value.resize(gpa, len);
@@ -1435,7 +1435,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const ArrayList,
                     ctx: EncodeCtx,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     const slice_codec: bk.Codec(ArrayList.Slice) = .standard(.slice(element));
                     for (values) |value| {
                         try slice_codec.encode(writer, config, &value.items, ctx);
@@ -1457,7 +1457,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *ArrayList,
                     ctx: DecodeCtx,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     const gpa = gpa_opt.?;
 
                     const len = try length.codec.decode(reader, null, config, null);
@@ -1568,7 +1568,7 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const Map,
                     maybe_ctx: EncodeCtxParam,
-                ) bk.EncodeWriterError!void {
+                ) bk.EncodeToWriterError!void {
                     const key_ctx, const val_ctx = unwrapKeyValCtxs(.encode, maybe_ctx);
 
                     for (values) |value| {
@@ -1595,7 +1595,7 @@ pub fn StdCodec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     value: *Map,
                     maybe_ctx: DecodeCtxParam,
-                ) bk.DecodeReaderError!void {
+                ) bk.DecodeFromReaderError!void {
                     const gpa = gpa_opt.?;
                     const key_ctx, const val_ctx = unwrapKeyValCtxs(.decode, maybe_ctx);
 

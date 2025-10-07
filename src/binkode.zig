@@ -48,9 +48,10 @@ pub const DecodeError = error{
     DecodeFailed,
 };
 
-pub const EncodeWriterError = EncodeError || std.Io.Writer.Error;
-pub const DecodeReaderError = DecodeError || std.mem.Allocator.Error || std.Io.Reader.Error;
-pub const DecodeSliceError = DecodeError || std.mem.Allocator.Error || error{EndOfStream};
+pub const EncodeToWriterError = EncodeError || std.Io.Writer.Error;
+pub const EncodeToSliceError = EncodeError || error{NoSpaceLeft};
+pub const DecodeFromReaderError = DecodeError || std.mem.Allocator.Error || std.Io.Reader.Error;
+pub const DecodeFromSliceError = DecodeError || std.mem.Allocator.Error || error{EndOfStream};
 
 /// This represents an encoding & decoding scheme for a value of type `V`.
 /// It is effectively a comptime-known VTable, which allows making different `Codec(V)`s
@@ -70,7 +71,7 @@ pub fn Codec(comptime V: type) type {
             values: []const V,
             /// Must point to a value of type `EncodeCtx`.
             ctx_ptr: *const anyopaque,
-        ) EncodeWriterError!void,
+        ) EncodeToWriterError!void,
 
         /// The type of the context consumed by `decodeInitFn`, `decodeFn`, and `freeFn`.
         DecodeCtx: type,
@@ -105,8 +106,7 @@ pub fn Codec(comptime V: type) type {
             reader: *std.Io.Reader,
             gpa_opt: ?std.mem.Allocator,
             config: Config,
-            /// If `decodeInitFn == null`, expected to point to undefined data,
-            /// which must be initialized.
+            /// If `decodeInitFn == null`, expected to point to undefined data, to be initialized.
             ///
             /// If `decodeInitFn != null`, expected to either have been initialized
             /// by `decodeInitFn`, or otherwise to be conformant with the documented
@@ -116,11 +116,12 @@ pub fn Codec(comptime V: type) type {
             value: *V,
             /// Must point to a value of type `DecodeCtx`.
             ctx_ptr: *const anyopaque,
-        ) DecodeReaderError!void,
+        ) DecodeFromReaderError!void,
 
         /// Frees any of the resources held by `value.*`.
         /// Assumes `value.*` is in a valid state as defined by the implementation,
-        /// meaning it must be able to free any value produced by `decodeInitFn` and `decodeFn`.
+        /// meaning it must be able to free any value produced by a successful call
+        /// to `decodeInitFn` and `decodeFn`.
         /// If this is null, the `free` method is a noop, meaning the implementation does not
         /// need to free any resources.
         freeFn: ?fn (
@@ -138,7 +139,7 @@ pub fn Codec(comptime V: type) type {
             config: Config,
             value: *const V,
             ctx: self.EncodeCtx,
-        ) EncodeWriterError!void {
+        ) EncodeToWriterError!void {
             return self.encodeMany(writer, config, @ptrCast(value), ctx);
         }
 
@@ -149,7 +150,7 @@ pub fn Codec(comptime V: type) type {
             config: Config,
             values: []const V,
             ctx: self.EncodeCtx,
-        ) EncodeWriterError!void {
+        ) EncodeToWriterError!void {
             return self.encodeFn(writer, config, values, @ptrCast(&ctx));
         }
 
@@ -178,9 +179,12 @@ pub fn Codec(comptime V: type) type {
             config: Config,
             value: *const V,
             ctx: self.EncodeCtx,
-        ) EncodeWriterError!usize {
+        ) EncodeToSliceError!usize {
             var fixed_writer: std.Io.Writer = .fixed(slice);
-            try self.encode(&fixed_writer, config, value, ctx);
+            self.encode(&fixed_writer, config, value, ctx) catch |err| switch (err) {
+                error.EncodeFailed => |e| return e,
+                error.WriteFailed => return error.NoSpaceLeft,
+            };
             return fixed_writer.end;
         }
 
@@ -226,7 +230,7 @@ pub fn Codec(comptime V: type) type {
             gpa_opt: ?std.mem.Allocator,
             config: Config,
             ctx: self.DecodeCtx,
-        ) DecodeReaderError!V {
+        ) DecodeFromReaderError!V {
             var value: V = undefined;
             try self.decodeInitOne(gpa_opt, &value, ctx);
             errdefer if (self.decodeInitFn != null) {
@@ -246,7 +250,7 @@ pub fn Codec(comptime V: type) type {
             gpa_opt: ?std.mem.Allocator,
             config: Config,
             ctx: self.DecodeCtx,
-        ) DecodeSliceError!struct { V, usize } {
+        ) DecodeFromSliceError!struct { V, usize } {
             const decode_init_defined = self.decodeInitFn != null;
 
             var value: V = undefined;
@@ -269,7 +273,7 @@ pub fn Codec(comptime V: type) type {
             gpa_opt: ?std.mem.Allocator,
             config: Config,
             ctx: self.DecodeCtx,
-        ) (DecodeSliceError || error{Overlong})!V {
+        ) (DecodeFromSliceError || error{Overlong})!V {
             const value, const len = try self.decodeSlice(src, gpa_opt, config, ctx);
             if (len != src.len) return error.Overlong;
             return value;
@@ -282,7 +286,7 @@ pub fn Codec(comptime V: type) type {
             gpa_opt: ?std.mem.Allocator,
             config: Config,
             ctx: self.DecodeCtx,
-        ) DecodeSliceError!V {
+        ) DecodeFromSliceError!V {
             const value, _ = try self.decodeSlice(src, gpa_opt, config, ctx);
             return value;
         }
@@ -325,7 +329,7 @@ pub fn Codec(comptime V: type) type {
             config: Config,
             value: *V,
             ctx: self.DecodeCtx,
-        ) DecodeReaderError!void {
+        ) DecodeFromReaderError!void {
             return self.decodeFn(reader, gpa_opt, config, value, @ptrCast(&ctx));
         }
 
@@ -338,7 +342,7 @@ pub fn Codec(comptime V: type) type {
             config: Config,
             value: *V,
             ctx: self.DecodeCtx,
-        ) DecodeSliceError!usize {
+        ) DecodeFromSliceError!usize {
             var reader: std.Io.Reader = .fixed(src);
             self.decodeInto(&reader, gpa_opt, config, value, ctx) catch |err| switch (err) {
                 error.DecodeFailed => |e| return e,
@@ -417,7 +421,7 @@ pub fn Codec(comptime V: type) type {
                     config: Config,
                     values: []const V,
                     ctx_ptr: *const anyopaque,
-                ) EncodeWriterError!void {
+                ) EncodeToWriterError!void {
                     const ctx: *const EncodeCtx = @ptrCast(@alignCast(ctx_ptr));
                     try methods.encode(writer, config, values, ctx.*);
                 }
@@ -437,7 +441,7 @@ pub fn Codec(comptime V: type) type {
                     config: Config,
                     value: *V,
                     ctx_ptr: *const anyopaque,
-                ) DecodeReaderError!void {
+                ) DecodeFromReaderError!void {
                     const ctx: *const DecodeCtx = @ptrCast(@alignCast(ctx_ptr));
                     try methods.decode(reader, config, gpa_opt, value, ctx.*);
                 }
