@@ -470,11 +470,13 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
+                    values: []const V,
                     ctx: DecodeCtxParam,
                 ) void {
-                    const unwrapped = if (value.*) |*unwrapped| unwrapped else return;
-                    payload.free(ctx.pl, gpa_opt, unwrapped);
+                    for (values) |*value| {
+                        const unwrapped = if (value.*) |*unwrapped| unwrapped else continue;
+                        payload.free(ctx.pl, gpa_opt, unwrapped);
+                    }
                 }
             });
 
@@ -574,11 +576,13 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
+                    values: []const V,
                     ctx: DecodeCtx,
                 ) void {
                     comptime if (!any_free) unreachable;
-                    freeFieldSubset(s_fields.len, gpa_opt, value, ctx);
+                    for (values) |*value| {
+                        freeFieldSubset(s_fields.len, gpa_opt, value, ctx);
+                    }
                 }
 
                 fn freeFieldSubset(
@@ -763,7 +767,7 @@ pub fn StdCodec(comptime V: type) type {
                                 // otherwise, initialize the new payload, free the old one, set the new payload, and then decode into it.
                                 var payload_val: @FieldType(V, @tagName(decoded_tag)) = undefined;
                                 try payload.codec.decodeInitOne(gpa_opt, &payload_val, payload_ctx);
-                                if (any_free) TaggedUnionImpl.free(gpa_opt, value, ctx);
+                                if (any_free) TaggedUnionImpl.free(gpa_opt, value[0..1], ctx);
                                 value.* = @unionInit(V, @tagName(decoded_tag), payload_val);
                             }
 
@@ -775,19 +779,19 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
+                    values: []const V,
                     maybe_ctx: DecodeCtxParam,
                 ) void {
                     comptime if (!any_free) unreachable;
                     const ctx: DecodeCtx = unwrapMaybeCtx(maybe_ctx);
-                    switch (value.*) {
+                    for (values) |*value| switch (value.*) {
                         inline else => |*payload_ptr, itag| {
                             const Payload = @FieldType(V, @tagName(itag));
                             const payload: StdCodec(Payload) = @field(payload_codecs, @tagName(itag));
                             const payload_ctx: payload.codec.DecodeCtx = getPlCtx(ctx, @tagName(itag), payload.codec.DecodeCtx);
                             payload.codec.free(gpa_opt, payload_ptr, payload_ctx);
                         },
-                    }
+                    };
                 }
 
                 fn unwrapMaybeCtx(maybe_ctx: DecodeCtxParam) DecodeCtx {
@@ -954,23 +958,20 @@ pub fn StdCodec(comptime V: type) type {
         pub fn array(element: StdCodec(Element)) StdCodecSelf {
             const EncodeCtx = element.codec.EncodeCtx;
             const DecodeCtx = element.codec.DecodeCtx;
-            const erased = Base.ImplementMethods(EncodeCtx, DecodeCtx, struct {
-                const not_implemented_err_msg = "array codec not is not implemented for type " ++ @typeName(V);
 
+            switch (@typeInfo(V)) {
+                .array => {},
+                else => @compileError("array codec not is not implemented for type " ++ @typeName(V)),
+            }
+
+            const erased = Base.ImplementMethods(EncodeCtx, DecodeCtx, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
                 ) bk.EncodeToWriterError!void {
-                    switch (@typeInfo(V)) {
-                        .array => try element.codec.encodeMany(writer, config, @ptrCast(values), ctx), // flatten `[]const [n]E` as `[]const E`
-                        .vector => |vec_info| for (values) |*value| {
-                            const arr: [vec_info.len]Element = value.*;
-                            try element.codec.encodeMany(writer, config, &arr, ctx);
-                        },
-                        else => @compileError(not_implemented_err_msg),
-                    }
+                    try element.codec.encodeMany(writer, config, @ptrCast(values), ctx);
                 }
 
                 pub fn decodeInit(
@@ -978,15 +979,7 @@ pub fn StdCodec(comptime V: type) type {
                     values: []V,
                     ctx: element.DecodeCtx,
                 ) std.mem.Allocator.Error!void {
-                    switch (@typeInfo(V)) {
-                        .array => try element.decodeInitMany(gpa_opt, @ptrCast(values), ctx), // flatten `[][n]E` as `[]E`.
-                        .vector => |vec_info| for (values) |*value| {
-                            var arr: [vec_info.len]Element = value.*;
-                            try element.decodeInitMany(gpa_opt, &arr, ctx);
-                            value.* = arr;
-                        },
-                        else => @compileError(not_implemented_err_msg),
-                    }
+                    try element.decodeInitMany(gpa_opt, @ptrCast(values), ctx); // flatten `[][n]E` as `[]E`.
                 }
 
                 pub fn decode(
@@ -996,24 +989,15 @@ pub fn StdCodec(comptime V: type) type {
                     value: *V,
                     ctx: DecodeCtx,
                 ) bk.DecodeFromReaderError!void {
-                    switch (@typeInfo(V)) {
-                        .array => for (value) |*elem| try element.codec.decodeInto(reader, gpa_opt, config, elem, ctx),
-                        .vector => |vec_info| for (0..vec_info.len) |i| try element.codec.decodeInto(reader, gpa_opt, config, &value[i], ctx),
-                        else => @compileError(not_implemented_err_msg),
-                    }
+                    for (value) |*elem| try element.codec.decodeInto(reader, gpa_opt, config, elem, ctx);
                 }
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
-                    ctx: element.DecodeCtx,
+                    values: []const V,
+                    ctx: DecodeCtx,
                 ) void {
-                    if (element.freeFn == null) return;
-                    switch (@typeInfo(V)) {
-                        .array => for (value) |*elem| element.free(gpa_opt, elem, ctx),
-                        .vector => |vec_info| for (0..vec_info.len) |i| element.free(gpa_opt, &value[i], ctx),
-                        else => @compileError(not_implemented_err_msg),
-                    }
+                    element.codec.freeMany(gpa_opt, @ptrCast(values), ctx); // flatten `[][n]E` as `[]E`.
                 }
             });
 
@@ -1085,12 +1069,14 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
+                    ptr_list: []const V,
                     ctx: DecodeCtx,
                 ) void {
                     const gpa = gpa_opt.?;
-                    child.codec.free(gpa, value.*, ctx);
-                    gpa.destroy(value.*);
+                    for (ptr_list) |ptr| {
+                        child.codec.free(gpa, ptr, ctx);
+                        gpa.destroy(ptr);
+                    }
                 }
             }));
         }
@@ -1161,9 +1147,15 @@ pub fn StdCodec(comptime V: type) type {
                 try reader.readSliceAll(@constCast(value.*)); // assumes this is allocated data, which must be mutable.
             }
 
-            pub fn free(gpa_opt: ?std.mem.Allocator, value: *const V, _: void) void {
+            pub fn free(
+                gpa_opt: ?std.mem.Allocator,
+                byte_slice_list: []const V,
+                _: void,
+            ) void {
                 const gpa = gpa_opt.?;
-                gpa.free(value.*);
+                for (byte_slice_list) |value| {
+                    gpa.free(value);
+                }
             }
         }));
 
@@ -1219,14 +1211,14 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
+                    slice_list: []const V,
                     ctx: DecodeCtx,
                 ) void {
                     const gpa = gpa_opt.?;
-                    if (element.codec.freeFn != null) {
-                        for (value.*) |*elem| element.free(gpa, elem, ctx);
+                    for (slice_list) |slice_value| {
+                        element.codec.freeMany(gpa_opt, slice_value, ctx);
+                        gpa.free(slice_value);
                     }
-                    gpa.free(value.*);
                 }
             }));
         }
@@ -1281,9 +1273,15 @@ pub fn StdCodec(comptime V: type) type {
                 value.* = result;
             }
 
-            pub fn free(gpa_opt: ?std.mem.Allocator, value: *const V, _: void) void {
+            pub fn free(
+                gpa_opt: ?std.mem.Allocator,
+                byte_array_ptr_list: []const V,
+                _: void,
+            ) void {
                 const gpa = gpa_opt.?;
-                gpa.free(value.*);
+                for (byte_array_ptr_list) |ptr| {
+                    gpa.free(ptr);
+                }
             }
         }));
 
@@ -1343,12 +1341,14 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
+                    array_ptr_list: []const V,
                     ctx: DecodeCtx,
                 ) void {
                     const gpa = gpa_opt.?;
-                    std_array.codec.free(gpa, value.*, ctx);
-                    gpa.free(value.*);
+                    for (array_ptr_list) |array_ptr_value| {
+                        std_array.codec.free(gpa_opt, array_ptr_value, ctx);
+                        gpa.free(array_ptr_value);
+                    }
                 }
             }));
         }
@@ -1396,12 +1396,14 @@ pub fn StdCodec(comptime V: type) type {
 
             pub fn free(
                 gpa_opt: ?std.mem.Allocator,
-                value: *const ArrayList,
+                values: []const ArrayList,
                 _: void,
             ) void {
                 const gpa = gpa_opt.?;
-                var copy = value.*;
-                copy.deinit(gpa);
+                for (values) |*value| {
+                    var copy = value.*;
+                    copy.deinit(gpa);
+                }
             }
         }));
 
@@ -1483,15 +1485,15 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const ArrayList,
+                    values: []const ArrayList,
                     ctx: DecodeCtx,
                 ) void {
                     const gpa = gpa_opt.?;
-                    if (element.codec.freeFn != null) {
-                        for (value.items) |*elem| element.free(gpa, elem, ctx);
+                    for (values) |*value| {
+                        element.codec.freeMany(gpa, value.items, ctx);
+                        var copy = value.*;
+                        copy.deinit(gpa);
                     }
-                    var copy = value.*;
-                    copy.deinit(gpa);
                 }
             }));
         }
@@ -1639,13 +1641,15 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const Map,
+                    values: []const Map,
                     maybe_ctx: DecodeCtxParam,
                 ) void {
                     const gpa = gpa_opt.?;
-                    freeKeysAndVals(gpa, value, maybe_ctx);
-                    var copy = value.*;
-                    copy.deinit(gpa);
+                    for (values) |*value| {
+                        freeKeysAndVals(gpa, value, maybe_ctx);
+                        var copy = value.*;
+                        copy.deinit(gpa);
+                    }
                 }
 
                 fn freeKeysAndVals(
@@ -2205,7 +2209,7 @@ test "array" {
 
     try testCodecRoundTrips([2]f32, .standard(.array(.float)), {}, {}, @ptrCast(&floatTestEdgeCases(f32) ++ floatTestEdgeCases(f32)));
     try testCodecRoundTrips([2]f64, .standard(.array(.float)), {}, {}, @ptrCast(&floatTestEdgeCases(f64) ++ floatTestEdgeCases(f64)));
-    try testCodecRoundTrips(@Vector(2, f32), .standard(.array(.float)), {}, {}, &.{
+    try testCodecRoundTrips([2]f32, .standard(.array(.float)), {}, {}, &.{
         .{ -1.0, 2 },
         .{ 61, -313131 },
         @splat(111111111.0),
