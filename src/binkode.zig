@@ -65,6 +65,8 @@ pub fn Codec(comptime V: type) type {
 
         /// Encodes all `values[i]` to the `writer` stream sequentially, in a manner defined by the implementation.
         /// The implementation should treat each `values[i]` as independent from all other `values[j]`.
+        ///
+        /// The implementation is allowed to assume/assert `values.len != 0`.
         encodeFn: fn (
             writer: *std.Io.Writer,
             config: Config,
@@ -80,11 +82,12 @@ pub fn Codec(comptime V: type) type {
         /// Should act as a semantic memset, where each `values[i]` is initialized independent
         /// of each other; this should be a memset in the sense that each value is considered
         /// to be in the same "state", but not necessarily the same exact bit pattern. For example,
-        /// where `V = *T`, each `values[i]` should generally be a distinct pointer from each
+        /// where `V = *T`, each `values[i]` would generally be a distinct pointer from each
         /// other `values[i]`, but pointing to similar, albeit equally independent data.
         /// The rationale for this design is to permit the implementation to define optimal
         /// initialization for batches of values.
-        /// The implementation must clean up any resources it allocated if it fails to complete.
+        /// The implementation must clean up any resources it allocated if it fails to complete,
+        /// leaving all `values[i]` in an undefined state.
         ///
         /// The implementation should document the the resulting value, and any other
         /// states it would consider valid for the purposes of in-place decoding, which
@@ -92,6 +95,8 @@ pub fn Codec(comptime V: type) type {
         /// The initial state should, conventionally, be some simple "empty" permutation.
         ///
         /// If this is null, the implementation assumes it will be overwriting undefined data in `decodeFn`.
+        ///
+        /// The implementation is allowed to assume/assert `values.len != 0`.
         decodeInitFn: ?fn (
             gpa_opt: ?std.mem.Allocator,
             /// Should be assumed to be undefined by the implementation, which should set
@@ -101,7 +106,10 @@ pub fn Codec(comptime V: type) type {
             ctx: anytype,
         ) std.mem.Allocator.Error!void,
 
-        /// Decodes into `value.*` from the `reader` stream.
+        /// Decodes a sequential list of of values to fill `values`, in a manner defined by the implementation.
+        /// The implementation should treat each `values[i]` as independent from all other `values[j]`.
+        ///
+        /// The implementation is allowed to assume/assert `values.len != 0`.
         decodeFn: fn (
             reader: *std.Io.Reader,
             gpa_opt: ?std.mem.Allocator,
@@ -110,10 +118,13 @@ pub fn Codec(comptime V: type) type {
             ///
             /// If `decodeInitFn != null`, expected to either have been initialized
             /// by `decodeInitFn`, or otherwise to be conformant with the documented
-            /// expectations of the implementation. Consult with the documentation
-            /// of the implementation to learn about the state of `value.*` in the
-            /// case of an error during `decode`.
-            value: *V,
+            /// expectations of the implementation.
+            ///
+            /// If the function returns an error, each initialized/decoded `values[i]` must be freed
+            /// by the implementation beforehand using `freeFn`, and as such the caller must treat all
+            /// `values[i]` as being in an undefined state, even if the resources were pre-allocated by
+            /// the caller.
+            values: []V,
             /// Must be a value of type `DecodeCtx`.
             ctx: anytype,
         ) DecodeFromReaderError!void,
@@ -124,9 +135,11 @@ pub fn Codec(comptime V: type) type {
         /// to `decodeInitFn` and `decodeFn`.
         /// If this is null, the `free` method is a noop, meaning the implementation does not
         /// need to free any resources.
+        ///
+        /// The implementation is allowed to assume/assert `values.len != 0`.
         freeFn: ?fn (
             gpa_opt: ?std.mem.Allocator,
-            value: []const V,
+            values: []const V,
             /// Must be a value of type `DecodeCtx`.
             ctx: anytype,
         ) void,
@@ -151,6 +164,7 @@ pub fn Codec(comptime V: type) type {
             values: []const V,
             ctx: self.EncodeCtx,
         ) EncodeToWriterError!void {
+            if (values.len == 0) return;
             return self.encodeFn(writer, config, values, ctx);
         }
 
@@ -233,11 +247,7 @@ pub fn Codec(comptime V: type) type {
         ) DecodeFromReaderError!V {
             var value: V = undefined;
             try self.decodeInitOne(gpa_opt, &value, ctx);
-            errdefer if (self.decodeInitFn != null) {
-                self.free(gpa_opt, &value, ctx);
-            };
-
-            try self.decodeInto(reader, gpa_opt, config, &value, ctx);
+            try self.decodeIntoOne(reader, gpa_opt, config, &value, ctx);
             return value;
         }
 
@@ -251,15 +261,9 @@ pub fn Codec(comptime V: type) type {
             config: Config,
             ctx: self.DecodeCtx,
         ) DecodeFromSliceError!struct { V, usize } {
-            const decode_init_defined = self.decodeInitFn != null;
-
             var value: V = undefined;
             try self.decodeInitOne(gpa_opt, &value, ctx);
-            errdefer if (decode_init_defined) self.free(gpa_opt, &value, ctx);
-
             const len = try self.decodeSliceInto(src, gpa_opt, config, &value, ctx);
-            errdefer if (!decode_init_defined) self.free(gpa_opt, &value, ctx);
-
             std.debug.assert(len <= src.len);
             return .{ value, len };
         }
@@ -275,6 +279,7 @@ pub fn Codec(comptime V: type) type {
             ctx: self.DecodeCtx,
         ) (DecodeFromSliceError || error{Overlong})!V {
             const value, const len = try self.decodeSlice(src, gpa_opt, config, ctx);
+            errdefer self.free(gpa_opt, &value, ctx);
             if (len != src.len) return error.Overlong;
             return value;
         }
@@ -315,25 +320,7 @@ pub fn Codec(comptime V: type) type {
             return try decodeInitFn(gpa_opt, values, ctx);
         }
 
-        /// Decodes into `value.*` from the `reader` stream.
-        /// If the codec requires allocation, `gpa_opt` must be non-null.
-        /// Caller is responsible for freeing any resources held by `value.*`,
-        /// including in event of failure.
-        ///
-        /// See doc comment on `decodeInitFn` for commentary on the expected
-        /// initial state of `value.*`.
-        pub fn decodeInto(
-            self: CodecSelf,
-            reader: *std.Io.Reader,
-            gpa_opt: ?std.mem.Allocator,
-            config: Config,
-            value: *V,
-            ctx: self.DecodeCtx,
-        ) DecodeFromReaderError!void {
-            return self.decodeFn(reader, gpa_opt, config, value, ctx);
-        }
-
-        /// Same as `decodeInto`, but takes a slice directly as input.
+        /// Same as `decodeIntoOne`, but takes a slice directly as input.
         /// Returns the number of bytes in `src` which were consumed to decode into `value.*`.
         pub fn decodeSliceInto(
             self: CodecSelf,
@@ -344,13 +331,44 @@ pub fn Codec(comptime V: type) type {
             ctx: self.DecodeCtx,
         ) DecodeFromSliceError!usize {
             var reader: std.Io.Reader = .fixed(src);
-            self.decodeInto(&reader, gpa_opt, config, value, ctx) catch |err| switch (err) {
+            self.decodeIntoOne(&reader, gpa_opt, config, value, ctx) catch |err| switch (err) {
                 error.DecodeFailed => |e| return e,
                 error.OutOfMemory => |e| return e,
                 error.EndOfStream => |e| return e,
                 error.ReadFailed => unreachable, // fixed-buffer reader cannot fail, it only returns error.EndOfStream.
             };
             return reader.seek;
+        }
+
+        /// Same as `decodeIntoMany`, but for a single value.
+        pub fn decodeIntoOne(
+            self: CodecSelf,
+            reader: *std.Io.Reader,
+            gpa_opt: ?std.mem.Allocator,
+            config: Config,
+            value: *V,
+            ctx: self.DecodeCtx,
+        ) DecodeFromReaderError!void {
+            return self.decodeIntoMany(reader, gpa_opt, config, @ptrCast(value), ctx);
+        }
+
+        /// Decodes into `values[i]` from the `reader` stream.
+        /// If the codec requires allocation, `gpa_opt` must be non-null.
+        ///
+        /// On error return, all `values[i]` will be freed and in an undefined state.
+        ///
+        /// See doc comments on `decodeFn` and `decodeInitFn` for commentary
+        /// on the expected initial state of `values[i]`.
+        pub fn decodeIntoMany(
+            self: CodecSelf,
+            reader: *std.Io.Reader,
+            gpa_opt: ?std.mem.Allocator,
+            config: Config,
+            values: []V,
+            ctx: self.DecodeCtx,
+        ) DecodeFromReaderError!void {
+            if (values.len == 0) return;
+            return self.decodeFn(reader, gpa_opt, config, values, ctx);
         }
 
         /// Frees any of the resources held by `value.*`.
@@ -373,6 +391,7 @@ pub fn Codec(comptime V: type) type {
             ctx: self.DecodeCtx,
         ) void {
             const freeFn = self.freeFn orelse return;
+            if (values.len == 0) return;
             freeFn(gpa_opt, values, ctx);
         }
 
@@ -430,6 +449,7 @@ pub fn Codec(comptime V: type) type {
                     if (@TypeOf(ctx) != EncodeCtx) @compileError(
                         "Expected type " ++ @typeName(EncodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
                     );
+                    std.debug.assert(values.len != 0);
                     try methods.encode(writer, config, values, ctx);
                 }
 
@@ -441,6 +461,7 @@ pub fn Codec(comptime V: type) type {
                     if (@TypeOf(ctx) != DecodeCtx) @compileError(
                         "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
                     );
+                    std.debug.assert(values.len != 0);
                     try methods.decodeInit(gpa_opt, values, ctx);
                 }
 
@@ -448,13 +469,14 @@ pub fn Codec(comptime V: type) type {
                     reader: *std.Io.Reader,
                     gpa_opt: ?std.mem.Allocator,
                     config: Config,
-                    value: *V,
+                    values: []V,
                     ctx: anytype,
                 ) DecodeFromReaderError!void {
                     if (@TypeOf(ctx) != DecodeCtx) @compileError(
                         "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
                     );
-                    try methods.decode(reader, config, gpa_opt, value, ctx);
+                    std.debug.assert(values.len != 0);
+                    try methods.decode(reader, config, gpa_opt, values, ctx);
                 }
 
                 pub fn free(
@@ -465,6 +487,7 @@ pub fn Codec(comptime V: type) type {
                     if (@TypeOf(ctx) != DecodeCtx) @compileError(
                         "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
                     );
+                    std.debug.assert(values.len != 0);
                     methods.free(gpa_opt, values, ctx);
                 }
             };
