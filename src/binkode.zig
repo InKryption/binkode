@@ -106,7 +106,7 @@ pub fn Codec(comptime V: type) type {
             ctx: anytype,
         ) std.mem.Allocator.Error!void,
 
-        /// Decodes a sequential list of of values to fill `values`, in a manner defined by the implementation.
+        /// Decodes a sequential list of values to fill `values`, in a manner defined by the implementation.
         /// The implementation should treat each `values[i]` as independent from all other `values[j]`.
         ///
         /// The number of valid decoded items is written to `decoded_count.*`, such that
@@ -243,7 +243,6 @@ pub fn Codec(comptime V: type) type {
         }
 
         /// Decodes the value from the `reader` stream and returns it.
-        /// If the codec requires allocation, `gpa_opt` must be non-null.
         pub fn decode(
             self: CodecSelf,
             reader: *std.Io.Reader,
@@ -315,7 +314,6 @@ pub fn Codec(comptime V: type) type {
         /// See the `decodeInitFn` field for important commentary on the implications
         /// of this and related functions.
         /// This is mainly relevant to codec implementations consuming other codecs.
-        /// If the codec requires allocation for decodeInit, `gpa_opt` must be non-null.
         pub fn decodeInitMany(
             self: CodecSelf,
             gpa_opt: ?std.mem.Allocator,
@@ -412,7 +410,6 @@ pub fn Codec(comptime V: type) type {
         /// Frees any of the resources held by `value.*`.
         /// Expects `value.*` to be in a valid state as defined by the implementation.
         /// Does not free the `value` as a pointer.
-        /// If the codec requires allocation, `gpa_opt` must be non-null.
         pub fn free(
             self: CodecSelf,
             gpa_opt: ?std.mem.Allocator,
