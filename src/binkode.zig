@@ -109,7 +109,14 @@ pub fn Codec(comptime V: type) type {
         /// Decodes a sequential list of of values to fill `values`, in a manner defined by the implementation.
         /// The implementation should treat each `values[i]` as independent from all other `values[j]`.
         ///
+        /// The number of valid decoded items is written to `decoded_count.*`, such that
+        /// the slice `values[0..decoded_count.*]` is all valid decoded values, which must be
+        /// freed by the caller.
+        /// `values[decoded_count.*..]` is only expected to be comprised of valid values if
+        /// `decodeInitFn != null`; if it is, the caller is also responsible for freeing it.
+        ///
         /// The implementation is allowed to assume/assert `values.len != 0`.
+        /// The implementation is allowed to assume/assert `decoded_count.* != 0` initially.
         decodeFn: fn (
             reader: *std.Io.Reader,
             gpa_opt: ?std.mem.Allocator,
@@ -119,12 +126,11 @@ pub fn Codec(comptime V: type) type {
             /// If `decodeInitFn != null`, expected to either have been initialized
             /// by `decodeInitFn`, or otherwise to be conformant with the documented
             /// expectations of the implementation.
-            ///
-            /// If the function returns an error, each initialized/decoded `values[i]` must be freed
-            /// by the implementation beforehand using `freeFn`, and as such the caller must treat all
-            /// `values[i]` as being in an undefined state, even if the resources were pre-allocated by
-            /// the caller.
             values: []V,
+            /// Output parameter for the number of values successfully decoded.
+            /// The only circumstance in which `values.len != decoded_count.*` is when an error returns.
+            /// Assume `decoded_count.* <= values.len`.
+            decoded_count: *usize,
             /// Must be a value of type `DecodeCtx`.
             ctx: anytype,
         ) DecodeFromReaderError!void,
@@ -317,6 +323,7 @@ pub fn Codec(comptime V: type) type {
             ctx: self.DecodeCtx,
         ) std.mem.Allocator.Error!void {
             const decodeInitFn = self.decodeInitFn orelse return;
+            if (values.len == 0) return;
             return try decodeInitFn(gpa_opt, values, ctx);
         }
 
@@ -353,9 +360,11 @@ pub fn Codec(comptime V: type) type {
         }
 
         /// Decodes into `values[i]` from the `reader` stream.
-        /// If the codec requires allocation, `gpa_opt` must be non-null.
         ///
-        /// On error return, all `values[i]` will be freed and in an undefined state.
+        /// If `decodeInitFn != null`, all `values[i]` must be in a defined state, because
+        /// on error return, all `values[i]` will be freed and in an undefined state.
+        /// If `decodeInitFn == null`, expects `values` to be in an undefined state, to
+        /// be overwritten during decoding, and will remain in such a state on error return.
         ///
         /// See doc comments on `decodeFn` and `decodeInitFn` for commentary
         /// on the expected initial state of `values[i]`.
@@ -368,7 +377,36 @@ pub fn Codec(comptime V: type) type {
             ctx: self.DecodeCtx,
         ) DecodeFromReaderError!void {
             if (values.len == 0) return;
-            return self.decodeFn(reader, gpa_opt, config, values, ctx);
+            var decoded_count: usize = 0;
+            self.decodeIntoManyRaw(reader, gpa_opt, config, values, &decoded_count, ctx) catch |err| {
+                const amt_to_free = if (self.decodeInitFn != null) values.len else decoded_count;
+                self.freeMany(gpa_opt, values[0..amt_to_free], ctx);
+                return err;
+            };
+        }
+
+        /// This function mainly concerns Codec implementations consuming other Codecs.
+        ///
+        /// Decodes into `values[i]` from the `reader` stream, outputting the number
+        /// of valid decoded elements that were written to it into `decoded_count.*`.
+        ///
+        /// See doc comments on `decodeFn` and `decodeInitFn` for commentary
+        /// on the expected initial state of `values[i]`, and other more detailed info.
+        pub fn decodeIntoManyRaw(
+            self: CodecSelf,
+            reader: *std.Io.Reader,
+            gpa_opt: ?std.mem.Allocator,
+            config: Config,
+            values: []V,
+            decoded_count: *usize,
+            ctx: self.DecodeCtx,
+        ) DecodeFromReaderError!void {
+            decoded_count.* = 0;
+            if (values.len == 0) return;
+            defer std.debug.assert(decoded_count.* <= values.len);
+            try self.decodeFn(reader, gpa_opt, config, values, decoded_count, ctx);
+            if (decoded_count.* != values.len) std.debug.panic("{} != {}", .{ decoded_count.*, values.len });
+            std.debug.assert(decoded_count.* == values.len);
         }
 
         /// Frees any of the resources held by `value.*`.
@@ -470,13 +508,15 @@ pub fn Codec(comptime V: type) type {
                     gpa_opt: ?std.mem.Allocator,
                     config: Config,
                     values: []V,
+                    decoded_count: *usize,
                     ctx: anytype,
                 ) DecodeFromReaderError!void {
                     if (@TypeOf(ctx) != DecodeCtx) @compileError(
                         "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
                     );
                     std.debug.assert(values.len != 0);
-                    try methods.decode(reader, config, gpa_opt, values, ctx);
+                    std.debug.assert(decoded_count.* == 0);
+                    try methods.decode(reader, config, gpa_opt, values, decoded_count, ctx);
                 }
 
                 pub fn free(
