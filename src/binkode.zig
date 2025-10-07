@@ -118,15 +118,15 @@ pub fn Codec(comptime V: type) type {
             ctx: anytype,
         ) DecodeFromReaderError!void,
 
-        /// Frees any of the resources held by `value.*`.
-        /// Assumes `value.*` is in a valid state as defined by the implementation,
+        /// Frees any of the resources held by each `value[i]`.
+        /// Assumes `value[i]` is in a valid state as defined by the implementation,
         /// meaning it must be able to free any value produced by a successful call
         /// to `decodeInitFn` and `decodeFn`.
         /// If this is null, the `free` method is a noop, meaning the implementation does not
         /// need to free any resources.
         freeFn: ?fn (
             gpa_opt: ?std.mem.Allocator,
-            value: *const V,
+            value: []const V,
             /// Must be a value of type `DecodeCtx`.
             ctx: anytype,
         ) void,
@@ -363,8 +363,17 @@ pub fn Codec(comptime V: type) type {
             value: *const V,
             ctx: self.DecodeCtx,
         ) void {
+            self.freeMany(gpa_opt, @ptrCast(value), ctx);
+        }
+
+        pub fn freeMany(
+            self: CodecSelf,
+            gpa_opt: ?std.mem.Allocator,
+            values: []const V,
+            ctx: self.DecodeCtx,
+        ) void {
             const freeFn = self.freeFn orelse return;
-            return freeFn(gpa_opt, value, ctx);
+            freeFn(gpa_opt, values, ctx);
         }
 
         /// Construct a codec from a composition of standard codecs for an assortment of types,
@@ -450,13 +459,13 @@ pub fn Codec(comptime V: type) type {
 
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
-                    value: *const V,
+                    values: []const V,
                     ctx: anytype,
                 ) void {
                     if (@TypeOf(ctx) != DecodeCtx) @compileError(
                         "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
                     );
-                    methods.free(gpa_opt, value, ctx);
+                    methods.free(gpa_opt, values, ctx);
                 }
             };
         }
