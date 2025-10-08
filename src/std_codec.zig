@@ -33,10 +33,10 @@ pub fn StdCodec(comptime V: type) type {
                 values: []const V,
                 ctx: void,
             ) bk.EncodeToWriterError!void {
-                _ = ctx;
                 _ = writer;
                 _ = config;
                 _ = values;
+                _ = ctx;
             }
 
             pub const decodeInit = null;
@@ -49,11 +49,24 @@ pub fn StdCodec(comptime V: type) type {
                 decoded_count: *usize,
                 ctx: void,
             ) bk.DecodeFromReaderError!void {
-                _ = ctx;
                 _ = reader;
                 _ = config;
                 _ = gpa_opt;
+                _ = ctx;
                 decoded_count.* = values.len;
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                ctx: void,
+            ) bk.DecodeSkipError!void {
+                _ = reader;
+                _ = config;
+                _ = ctx;
+                decoded_count.* = value_count;
             }
 
             pub const free = null;
@@ -83,6 +96,17 @@ pub fn StdCodec(comptime V: type) type {
             ) bk.DecodeFromReaderError!void {
                 try reader.readSliceAll(values);
                 decoded_count.* = values.len;
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                _: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                _: void,
+            ) bk.DecodeSkipError!void {
+                try reader.discardAll(value_count);
+                decoded_count.* = value_count;
             }
 
             pub const free = null;
@@ -125,17 +149,42 @@ pub fn StdCodec(comptime V: type) type {
                 for (values, 0..) |*value, i| {
                     errdefer decoded_count.* = i;
 
-                    var real_byte: u8 = undefined;
-                    try reader.readSliceAll((&real_byte)[0..1]);
-                    value.* = switch (real_byte) {
+                    value.* = switch (try readOneByte(reader)) {
                         0 => false,
                         1 => true,
-                        else => {
+                        else => |real_byte| {
                             if (maybe_diag) |diag| diag.real_byte = real_byte;
                             return error.DecodeFailed;
                         },
                     };
                 }
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                _: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                maybe_diag: ?*BoolDecodeDiag,
+            ) bk.DecodeSkipError!void {
+                decoded_count.* = value_count;
+                for (0..value_count) |i| {
+                    errdefer decoded_count.* = i;
+
+                    switch (try readOneByte(reader)) {
+                        0, 1 => {},
+                        else => |real_byte| {
+                            if (maybe_diag) |diag| diag.real_byte = real_byte;
+                            return error.DecodeFailed;
+                        },
+                    }
+                }
+            }
+
+            fn readOneByte(reader: *std.Io.Reader) std.Io.Reader.Error!u8 {
+                var real_byte: u8 = undefined;
+                try reader.readSliceAll((&real_byte)[0..1]);
+                return real_byte;
             }
 
             pub const free = null;
@@ -218,9 +267,37 @@ pub fn StdCodec(comptime V: type) type {
                 decoded_count: *usize,
                 maybe_diag: ?*IntDecodeDiag,
             ) bk.DecodeFromReaderError!void {
-                decoded_count.* = values.len;
+                try decodeImpl(reader, config, false, values, decoded_count, maybe_diag);
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                maybe_diag: ?*IntDecodeDiag,
+            ) bk.DecodeSkipError!void {
+                try decodeImpl(reader, config, true, value_count, decoded_count, maybe_diag);
+            }
+
+            fn decodeImpl(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                comptime skip: bool,
+                values_or_count: if (skip) usize else []V,
+                decoded_count: *usize,
+                maybe_diag: ?*IntDecodeDiag,
+            ) !void {
+                const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                const values = if (skip) blk: {
+                    var void_slice: []void = &.{};
+                    void_slice.len = value_count;
+                    break :blk void_slice;
+                } else values_or_count;
+
+                decoded_count.* = value_count;
                 switch (config.int) {
-                    .fixint => for (values, 0..) |*value, index| {
+                    .fixint => for (values, 0..value_count) |*value, index| {
                         errdefer decoded_count.* = index;
 
                         var int_bytes: [@sizeOf(Int)]u8 = undefined;
@@ -231,9 +308,9 @@ pub fn StdCodec(comptime V: type) type {
                             decoded_count.* = index;
                             return error.DecodeFailed;
                         }
-                        value.* = @intCast(decoded_int);
+                        if (!skip) value.* = @intCast(decoded_int);
                     },
-                    .varint => for (values, 0..) |*value, index| {
+                    .varint => for (values, 0..value_count) |*value, index| {
                         errdefer decoded_count.* = index;
 
                         const raw_int = try bk.varint.decodeReader(reader, config.endian);
@@ -243,7 +320,7 @@ pub fn StdCodec(comptime V: type) type {
                                     if (maybe_diag) |diag| diag.raw_int = raw_int;
                                     return error.DecodeFailed;
                                 }
-                                value.* = @intCast(raw_int);
+                                if (!skip) value.* = @intCast(raw_int);
                             },
                             .signed => {
                                 const EncodedInt = bk.varint.zigzag.SignedAsUnsigned(Int);
@@ -257,7 +334,7 @@ pub fn StdCodec(comptime V: type) type {
                                     if (maybe_diag) |diag| diag.raw_int = decoded_int;
                                     return error.DecodeFailed;
                                 }
-                                value.* = @intCast(decoded_int);
+                                if (!skip) value.* = @intCast(decoded_int);
                             },
                         }
                     },
@@ -300,6 +377,17 @@ pub fn StdCodec(comptime V: type) type {
             ) bk.DecodeFromReaderError!void {
                 try reader.readSliceEndian(AsInt, @ptrCast(values), config.endian);
                 decoded_count.* = values.len;
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                _: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                _: void,
+            ) bk.DecodeSkipError!void {
+                try reader.discardAll(@sizeOf(AsInt) * value_count);
+                decoded_count.* = value_count;
             }
 
             pub const free = null;
@@ -364,8 +452,34 @@ pub fn StdCodec(comptime V: type) type {
                 decoded_count: *usize,
                 _: void,
             ) bk.DecodeFromReaderError!void {
-                decoded_count.* = values.len;
-                for (values, 0..) |*value, i| {
+                try decodeImpl(reader, false, values, decoded_count);
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                _: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                _: void,
+            ) bk.DecodeSkipError!void {
+                try decodeImpl(reader, true, value_count, decoded_count);
+            }
+
+            fn decodeImpl(
+                reader: *std.Io.Reader,
+                comptime skip: bool,
+                values_or_count: if (skip) usize else []V,
+                decoded_count: *usize,
+            ) !void {
+                const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                const values = if (skip) blk: {
+                    var void_slice: []void = &.{};
+                    void_slice.len = value_count;
+                    break :blk void_slice;
+                } else values_or_count;
+
+                decoded_count.* = value_count;
+                for (values, 0..value_count) |*value, i| {
                     errdefer decoded_count.* = i;
 
                     const first_byte = first_byte: {
@@ -388,7 +502,7 @@ pub fn StdCodec(comptime V: type) type {
                     if (cp > std.math.maxInt(V)) {
                         return error.DecodeFailed;
                     }
-                    value.* = @intCast(cp);
+                    if (!skip) value.* = @intCast(cp);
                 }
             }
 
@@ -451,7 +565,7 @@ pub fn StdCodec(comptime V: type) type {
                             error.WriteFailed => |e| return e,
                             error.EncodeFailed => unreachable, // bool never fails to encode
                         };
-                        const payload_ptr = if (value.*) |*unwrapped| unwrapped else return;
+                        const payload_ptr = if (value.*) |*unwrapped| unwrapped else continue;
                         try payload.encode(writer, config, payload_ptr, {});
                     }
                 }
@@ -473,6 +587,35 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     maybe_ctx: DecodeCtxParam,
                 ) bk.DecodeFromReaderError!void {
+                    try decodeImpl(reader, config, false, gpa_opt, values, decoded_count, maybe_ctx);
+                }
+
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    maybe_ctx: DecodeCtxParam,
+                ) bk.DecodeSkipError!void {
+                    try decodeImpl(reader, config, true, null, value_count, decoded_count, maybe_ctx);
+                }
+
+                fn decodeImpl(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    comptime skip: bool,
+                    gpa_opt: ?if (skip) noreturn else std.mem.Allocator,
+                    values_or_count: if (skip) usize else []V,
+                    decoded_count: *usize,
+                    maybe_ctx: DecodeCtxParam,
+                ) !void {
+                    const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                    const values = if (skip) blk: {
+                        var void_slice: []void = &.{};
+                        void_slice.len = value_count;
+                        break :blk void_slice;
+                    } else values_or_count;
+
                     const ctx: DecodeCtx = ctx: {
                         if (!decode_ctx_opt) break :ctx maybe_ctx;
                         break :ctx maybe_ctx orelse .{
@@ -481,22 +624,31 @@ pub fn StdCodec(comptime V: type) type {
                         };
                     };
 
-                    decoded_count.* = values.len;
-                    for (values, 0..) |*value, i| {
+                    decoded_count.* = value_count;
+                    for (values, 0..value_count) |*value, i| {
                         errdefer decoded_count.* = i;
 
-                        const is_some = try boolean.codec.decode(reader, null, config, ctx.diag);
-                        if (is_some) {
-                            if (!decode_init_defined or value.* == null) {
-                                value.* = @as(Unwrapped, undefined);
-                                try payload.decodeInitOne(gpa_opt, &value.*.?, ctx.pl);
+                        const is_some = boolean.codec.decode(reader, null, config, ctx.diag) catch |err| switch (err) {
+                            error.OutOfMemory => unreachable,
+                            else => |e| return e,
+                        };
+                        if (!skip) {
+                            if (is_some) {
+                                if (!decode_init_defined or value.* == null) {
+                                    value.* = @as(Unwrapped, undefined);
+                                    try payload.decodeInitOne(gpa_opt, &value.*.?, ctx.pl);
+                                }
+                                try payload.decodeIntoOne(reader, gpa_opt, config, &value.*.?, ctx.pl);
+                            } else {
+                                if (decode_init_defined) if (value.*) |*pl| {
+                                    payload.free(gpa_opt, pl, ctx.pl);
+                                };
+                                value.* = null;
                             }
-                            try payload.decodeIntoOne(reader, gpa_opt, config, &value.*.?, ctx.pl);
                         } else {
-                            if (decode_init_defined) if (value.*) |*pl| {
-                                payload.free(gpa_opt, pl, ctx.pl);
-                            };
-                            value.* = null;
+                            if (is_some) {
+                                try payload.decodeSkip(reader, config, 1, ctx.pl);
+                            }
                         }
                     }
                 }
@@ -528,6 +680,7 @@ pub fn StdCodec(comptime V: type) type {
                 .DecodeCtx = DecodeCtxParam,
                 .decodeInitFn = if (decode_init_defined) erased.decodeInit else null,
                 .decodeFn = erased.decode,
+                .decodeSkipFn = erased.decodeSkip,
                 .freeFn = if (free_defined) erased.free else null,
             });
         }
@@ -607,16 +760,49 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     maybe_ctx: DecodeCtx,
                 ) bk.DecodeFromReaderError!void {
-                    decoded_count.* = values.len;
+                    try decodeImpl(reader, config, false, gpa_opt, values, decoded_count, maybe_ctx);
+                }
+
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    maybe_ctx: DecodeCtx,
+                ) bk.DecodeSkipError!void {
+                    try decodeImpl(reader, config, true, null, value_count, decoded_count, maybe_ctx);
+                }
+
+                fn decodeImpl(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    comptime skip: bool,
+                    gpa_opt: ?if (skip) noreturn else std.mem.Allocator,
+                    values_or_count: if (skip) usize else []V,
+                    decoded_count: *usize,
+                    maybe_ctx: DecodeCtx,
+                ) !void {
+                    const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                    const values = if (skip) blk: {
+                        var void_slice: []void = &.{};
+                        void_slice.len = value_count;
+                        break :blk void_slice;
+                    } else values_or_count;
+
+                    decoded_count.* = value_count;
                     for (values, 0..) |*value, i| {
                         errdefer decoded_count.* = i;
 
                         inline for (s_fields, 0..) |s_field, s_i| {
-                            errdefer freeFieldSubset(s_i, gpa_opt, value, maybe_ctx);
                             const field: StdCodec(s_field.type) = @field(field_codecs, s_field.name);
                             const field_ctx = getFieldCtx(maybe_ctx, s_field.name, field.codec.DecodeCtx);
-                            const field_ptr = &@field(value, s_field.name);
-                            try field.codec.decodeIntoOne(reader, gpa_opt, config, field_ptr, field_ctx);
+                            if (!skip) {
+                                errdefer freeFieldSubset(s_i, gpa_opt, value, maybe_ctx);
+                                const field_ptr = &@field(value, s_field.name);
+                                try field.codec.decodeIntoOne(reader, gpa_opt, config, field_ptr, field_ctx);
+                            } else {
+                                try field.codec.decodeSkip(reader, config, 1, field_ctx);
+                            }
                         }
                     }
                 }
@@ -671,6 +857,7 @@ pub fn StdCodec(comptime V: type) type {
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = if (any_decode_init) erased.decodeInit else null,
                 .decodeFn = erased.decode,
+                .decodeSkipFn = erased.decodeSkip,
                 .freeFn = if (any_free) erased.free else null,
             });
         }
@@ -796,36 +983,73 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     maybe_ctx: DecodeCtxParam,
                 ) bk.DecodeFromReaderError!void {
+                    try decodeImpl(reader, config, false, gpa_opt, values, decoded_count, maybe_ctx);
+                }
+
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    maybe_ctx: DecodeCtxParam,
+                ) bk.DecodeSkipError!void {
+                    try decodeImpl(reader, config, true, null, value_count, decoded_count, maybe_ctx);
+                }
+
+                fn decodeImpl(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    comptime skip: bool,
+                    gpa_opt: ?if (skip) noreturn else std.mem.Allocator,
+                    values_or_count: if (skip) usize else []V,
+                    decoded_count: *usize,
+                    maybe_ctx: DecodeCtxParam,
+                ) !void {
+                    const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                    const values = if (skip) blk: {
+                        var void_slice: []void = &.{};
+                        void_slice.len = value_count;
+                        break :blk void_slice;
+                    } else values_or_count;
+
                     const valid_init_state = comptime decode_init_tag_opt != null;
                     const ctx: DecodeCtx = unwrapMaybeCtx(maybe_ctx);
 
                     decoded_count.* = values.len;
-                    for (values, 0..) |*value, i| {
+                    for (values, 0..value_count) |*value, i| {
                         errdefer decoded_count.* = i;
 
-                        switch (try std_tag.codec.decode(reader, null, config, ctx.diag)) {
+                        const tag = std_tag.codec.decode(reader, null, config, ctx.diag) catch |err| switch (err) {
+                            error.OutOfMemory => unreachable,
+                            else => |e| return e,
+                        };
+                        switch (tag) {
                             inline else => |decoded_tag| {
                                 const Payload = @FieldType(V, @tagName(decoded_tag));
                                 const payload: StdCodec(Payload) = @field(payload_codecs, @tagName(decoded_tag));
                                 const payload_ctx: payload.codec.DecodeCtx = getPlCtx(ctx, @tagName(decoded_tag), payload.codec.DecodeCtx);
 
-                                // if there's no valid inital state to worry about, just ovewrite and decode
-                                if (!valid_init_state) {
-                                    value.* = @unionInit(V, @tagName(decoded_tag), undefined);
+                                if (!skip) {
+                                    // if there's no valid inital state to worry about, just ovewrite and decode
+                                    if (!valid_init_state) {
+                                        value.* = @unionInit(V, @tagName(decoded_tag), undefined);
+                                        const payload_ptr = &@field(value, @tagName(decoded_tag));
+                                        try payload.codec.decodeInitOne(gpa_opt, payload_ptr, payload_ctx);
+
+                                        // if there's a valid initial state and it matches the decoded tag, decode the payload in-place.
+                                    } else if (value.* != decoded_tag) {
+                                        // otherwise, initialize the new payload, free the old one, set the new payload, and then decode into it.
+                                        var payload_val: @FieldType(V, @tagName(decoded_tag)) = undefined;
+                                        try payload.codec.decodeInitOne(gpa_opt, &payload_val, payload_ctx);
+                                        if (any_free) TaggedUnionImpl.free(gpa_opt, value[0..1], ctx);
+                                        value.* = @unionInit(V, @tagName(decoded_tag), payload_val);
+                                    }
+
                                     const payload_ptr = &@field(value, @tagName(decoded_tag));
-                                    try payload.codec.decodeInitOne(gpa_opt, payload_ptr, payload_ctx);
-
-                                    // if there's a valid initial state and it matches the decoded tag, decode the payload in-place.
-                                } else if (value.* != decoded_tag) {
-                                    // otherwise, initialize the new payload, free the old one, set the new payload, and then decode into it.
-                                    var payload_val: @FieldType(V, @tagName(decoded_tag)) = undefined;
-                                    try payload.codec.decodeInitOne(gpa_opt, &payload_val, payload_ctx);
-                                    if (any_free) TaggedUnionImpl.free(gpa_opt, value[0..1], ctx);
-                                    value.* = @unionInit(V, @tagName(decoded_tag), payload_val);
+                                    try payload.codec.decodeIntoOne(reader, gpa_opt, config, payload_ptr, payload_ctx);
+                                } else {
+                                    try payload.codec.decodeSkip(reader, config, 1, payload_ctx);
                                 }
-
-                                const payload_ptr = &@field(value, @tagName(decoded_tag));
-                                try payload.codec.decodeIntoOne(reader, gpa_opt, config, payload_ptr, payload_ctx);
                             },
                         }
                     }
@@ -891,6 +1115,7 @@ pub fn StdCodec(comptime V: type) type {
                 .DecodeCtx = DecodeCtxParam,
                 .decodeInitFn = if (decode_init_tag_opt != null) erased.decodeInit else null,
                 .decodeFn = erased.decode,
+                .decodeSkipFn = erased.decodeSkip,
                 .freeFn = if (any_free) erased.free else null,
             });
         }
@@ -952,11 +1177,42 @@ pub fn StdCodec(comptime V: type) type {
                 decoded_count: *usize,
                 maybe_diag: ?*DiscriminantDecodeCtx,
             ) bk.DecodeFromReaderError!void {
+                try decodeImpl(reader, config, false, values, decoded_count, maybe_diag);
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                maybe_diag: ?*DiscriminantDecodeCtx,
+            ) bk.DecodeSkipError!void {
+                try decodeImpl(reader, config, true, value_count, decoded_count, maybe_diag);
+            }
+
+            fn decodeImpl(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                comptime skip: bool,
+                values_or_count: if (skip) usize else []V,
+                decoded_count: *usize,
+                maybe_diag: ?*DiscriminantDecodeCtx,
+            ) !void {
+                const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                const values = if (skip) blk: {
+                    var void_slice: []void = &.{};
+                    void_slice.len = value_count;
+                    break :blk void_slice;
+                } else values_or_count;
+
                 decoded_count.* = values.len;
-                for (values, 0..) |*value, i| {
+                for (values, 0..value_count) |*value, i| {
                     errdefer decoded_count.* = i;
 
-                    const as_u32 = try u32_codec.decode(reader, null, config, null);
+                    const as_u32 = u32_codec.decode(reader, null, config, null) catch |err| switch (err) {
+                        error.OutOfMemory => unreachable,
+                        else => |e| return e,
+                    };
                     if (as_u32 > std.math.maxInt(enum_info.tag_type)) {
                         if (maybe_diag) |diag| diag.real_int = as_u32;
                         return error.DecodeFailed;
@@ -973,7 +1229,7 @@ pub fn StdCodec(comptime V: type) type {
                     //     else => |tag| @enumFromInt(@intFromEnum(tag)),
                     // };
                     // ```
-                    value.* = std.enums.fromInt(V, raw) orelse {
+                    if (!skip) value.* = std.enums.fromInt(V, raw) orelse {
                         if (maybe_diag) |diag| diag.real_int = as_u32;
                         return error.DecodeFailed;
                     };
@@ -1038,6 +1294,28 @@ pub fn StdCodec(comptime V: type) type {
                     );
                 }
 
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) bk.DecodeSkipError!void {
+                    defer {
+                        // since we pass `decoded_count` directly into the flattened call,
+                        // this is going to be `value_count * array_len`, so the actual
+                        // number of arrays decoded is `decoded_count.* / array_len`.
+                        decoded_count.* = @divExact(decoded_count.*, array_len);
+                    }
+                    try element.codec.decodeSkipManyRaw(
+                        reader,
+                        config,
+                        value_count * array_len,
+                        decoded_count,
+                        ctx,
+                    );
+                }
+
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
                     values: []const V,
@@ -1054,6 +1332,7 @@ pub fn StdCodec(comptime V: type) type {
                 .DecodeCtx = element.codec.DecodeCtx,
                 .decodeInitFn = if (element.codec.decodeInitFn != null) erased.decodeInit else null,
                 .decodeFn = erased.decode,
+                .decodeSkipFn = erased.decodeSkip,
                 .freeFn = if (element.codec.freeFn != null) erased.free else null,
             });
         }
@@ -1120,6 +1399,16 @@ pub fn StdCodec(comptime V: type) type {
                     }
                 }
 
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) bk.DecodeSkipError!void {
+                    try child.codec.decodeSkipManyRaw(reader, config, value_count, decoded_count, ctx);
+                }
+
                 pub fn free(
                     gpa_opt: ?std.mem.Allocator,
                     ptr_list: []const V,
@@ -1177,49 +1466,85 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     ctx: DecodeCtx,
                 ) bk.DecodeFromReaderError!void {
-                    const gpa = gpa_opt.?;
+                    try decodeImpl(reader, config, false, gpa_opt, values, decoded_count, ctx);
+                }
 
-                    decoded_count.* = values.len;
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) bk.DecodeSkipError!void {
+                    try decodeImpl(reader, config, true, null, value_count, decoded_count, ctx);
+                }
+
+                fn decodeImpl(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    comptime skip: bool,
+                    gpa_opt: ?if (skip) noreturn else std.mem.Allocator,
+                    values_or_count: if (skip) usize else []V,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) !void {
+                    const gpa = if (!skip) gpa_opt.?;
+
+                    const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                    const values = if (skip) blk: {
+                        var void_slice: []void = &.{};
+                        void_slice.len = value_count;
+                        break :blk void_slice;
+                    } else values_or_count;
+
+                    decoded_count.* = value_count;
                     for (values, 0..) |*value, i| {
                         errdefer decoded_count.* = i;
 
-                        const len = try length.codec.decode(reader, null, config, null);
-                        const value_init_len = value.len;
-                        if (len != value_init_len) {
-                            if (len < value_init_len) {
-                                element.codec.freeMany(gpa, value.*[len..], ctx);
-                            }
+                        const len = length.codec.decode(reader, null, config, null) catch |err| switch (err) {
+                            error.OutOfMemory => unreachable,
+                            else => |e| return e,
+                        };
+                        if (!skip) {
+                            const value_init_len = value.len;
+                            if (len != value_init_len) {
+                                if (len < value_init_len) {
+                                    element.codec.freeMany(gpa, value.*[len..], ctx);
+                                }
 
-                            if (gpa.resize(@constCast(value.*), len)) {
-                                value.len = len;
-                            } else if (gpa.remap(@constCast(value.*), len)) |new_slice| {
-                                value.* = new_slice;
-                            } else {
-                                const new_slice = try gpa.alignedAlloc(
-                                    Element,
-                                    .fromByteUnits(ptr_info.alignment),
-                                    len,
-                                );
-                                errdefer gpa.free(new_slice);
+                                if (gpa.resize(@constCast(value.*), len)) {
+                                    value.len = len;
+                                } else if (gpa.remap(@constCast(value.*), len)) |new_slice| {
+                                    value.* = new_slice;
+                                } else {
+                                    const new_slice = try gpa.alignedAlloc(
+                                        Element,
+                                        .fromByteUnits(ptr_info.alignment),
+                                        len,
+                                    );
+                                    errdefer gpa.free(new_slice);
 
-                                const amt = @min(value_init_len, len);
-                                @memcpy(new_slice[0..amt], value.*[0..amt]);
-                                gpa.free(value.*);
-                                value.* = new_slice;
-                            }
-
-                            if (len > value_init_len) {
-                                element.codec.decodeInitMany(gpa, @constCast(value.*[value_init_len..]), ctx) catch |err| {
-                                    // free the slice and its initialized elements and set it to empty, so that
-                                    // the errdefer above can safely free it along with every other slice value.
-                                    element.codec.freeMany(gpa, value.*[0..value_init_len], ctx);
+                                    const amt = @min(value_init_len, len);
+                                    @memcpy(new_slice[0..amt], value.*[0..amt]);
                                     gpa.free(value.*);
-                                    value.* = &.{};
-                                    return err;
-                                };
+                                    value.* = new_slice;
+                                }
+
+                                if (len > value_init_len) {
+                                    element.codec.decodeInitMany(gpa, @constCast(value.*[value_init_len..]), ctx) catch |err| {
+                                        // free the slice and its initialized elements and set it to empty, so that
+                                        // the errdefer above can safely free it along with every other slice value.
+                                        element.codec.freeMany(gpa, value.*[0..value_init_len], ctx);
+                                        gpa.free(value.*);
+                                        value.* = &.{};
+                                        return err;
+                                    };
+                                }
                             }
+                            try element.codec.decodeIntoMany(reader, gpa, config, @constCast(value.*), ctx);
+                        } else {
+                            try element.codec.decodeSkip(reader, config, len, ctx);
                         }
-                        try element.codec.decodeIntoMany(reader, gpa, config, @constCast(value.*), ctx);
                     }
                 }
 
@@ -1243,6 +1568,7 @@ pub fn StdCodec(comptime V: type) type {
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = erased.decodeInit,
                 .decodeFn = erased.decode,
+                .decodeSkipFn = erased.decodeSkip,
                 .freeFn = erased.free,
             });
         }
@@ -1285,25 +1611,61 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     ctx: DecodeCtx,
                 ) bk.DecodeFromReaderError!void {
-                    const gpa = gpa_opt.?;
+                    try decodeImpl(reader, config, false, gpa_opt, values, decoded_count, ctx);
+                }
+
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) bk.DecodeSkipError!void {
+                    try decodeImpl(reader, config, true, null, value_count, decoded_count, ctx);
+                }
+
+                fn decodeImpl(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    comptime skip: bool,
+                    gpa_opt: ?if (skip) noreturn else std.mem.Allocator,
+                    values_or_count: if (skip) usize else []V,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) !void {
+                    const gpa = if (!skip) gpa_opt.?;
+
+                    const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                    const values = if (skip) blk: {
+                        var void_slice: []void = &.{};
+                        void_slice.len = value_count;
+                        break :blk void_slice;
+                    } else values_or_count;
 
                     decoded_count.* = values.len;
                     for (values, 0..) |*value, i| {
                         errdefer decoded_count.* = i;
 
                         const expected_len = @typeInfo(ptr_info.child).array.len;
-                        const actual_len = try length.codec.decode(reader, null, config, null);
+                        const actual_len = length.codec.decode(reader, null, config, null) catch |err| switch (err) {
+                            error.OutOfMemory => unreachable,
+                            else => |e| return e,
+                        };
                         if (actual_len != expected_len) return error.DecodeFailed;
 
-                        const array_ptr = (try gpa.alignedAlloc(
-                            @typeInfo(ptr_info.child).array.child,
-                            .fromByteUnits(ptr_info.alignment),
-                            actual_len,
-                        ))[0..expected_len];
-                        errdefer gpa.free(array_ptr);
+                        if (!skip) {
+                            const array_ptr = (try gpa.alignedAlloc(
+                                @typeInfo(ptr_info.child).array.child,
+                                .fromByteUnits(ptr_info.alignment),
+                                actual_len,
+                            ))[0..expected_len];
+                            errdefer gpa.free(array_ptr);
 
-                        try std_array.codec.decodeIntoOne(reader, gpa, config, array_ptr, ctx);
-                        value.* = array_ptr;
+                            try std_array.codec.decodeIntoOne(reader, gpa, config, array_ptr, ctx);
+                            value.* = array_ptr;
+                        } else {
+                            try std_array.codec.decodeSkip(reader, config, 1, ctx);
+                        }
                     }
                 }
 
@@ -1374,28 +1736,64 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     ctx: DecodeCtx,
                 ) bk.DecodeFromReaderError!void {
-                    const gpa = gpa_opt.?;
+                    try decodeImpl(reader, config, false, gpa_opt, values, decoded_count, ctx);
+                }
+
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) bk.DecodeSkipError!void {
+                    try decodeImpl(reader, config, true, null, value_count, decoded_count, ctx);
+                }
+
+                fn decodeImpl(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    comptime skip: bool,
+                    gpa_opt: ?if (skip) noreturn else std.mem.Allocator,
+                    values_or_count: if (skip) usize else []V,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) !void {
+                    const gpa = if (!skip) gpa_opt.?;
+
+                    const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                    const values = if (skip) blk: {
+                        var void_slice: []void = &.{};
+                        void_slice.len = value_count;
+                        break :blk void_slice;
+                    } else values_or_count;
 
                     decoded_count.* = values.len;
                     for (values, 0..) |*value, i| {
                         errdefer decoded_count.* = i;
 
-                        const len = try length.codec.decode(reader, null, config, null);
-                        try value.ensureTotalCapacityPrecise(gpa, len);
+                        const len = length.codec.decode(reader, null, config, null) catch |err| switch (err) {
+                            error.OutOfMemory => unreachable,
+                            else => |e| return e,
+                        };
 
-                        if (len > value.items.len) {
-                            const additional = value.addManyAsSliceAssumeCapacity(len - value.items.len);
-                            element.codec.decodeInitMany(gpa, additional, ctx) catch |err| {
-                                value.shrinkRetainingCapacity(len - additional.len);
-                                return err;
-                            };
-                        } else if (len < value.items.len) {
-                            element.codec.freeMany(gpa, value.items[len..], ctx);
-                            value.shrinkRetainingCapacity(len);
+                        if (!skip) {
+                            try value.ensureTotalCapacityPrecise(gpa, len);
+                            if (len > value.items.len) {
+                                const additional = value.addManyAsSliceAssumeCapacity(len - value.items.len);
+                                element.codec.decodeInitMany(gpa, additional, ctx) catch |err| {
+                                    value.shrinkRetainingCapacity(len - additional.len);
+                                    return err;
+                                };
+                            } else if (len < value.items.len) {
+                                element.codec.freeMany(gpa, value.items[len..], ctx);
+                                value.shrinkRetainingCapacity(len);
+                            }
+                            std.debug.assert(value.items.len == len);
+
+                            try element.codec.decodeIntoMany(reader, gpa, config, value.items, ctx);
+                        } else {
+                            try element.codec.decodeSkip(reader, config, len, ctx);
                         }
-                        std.debug.assert(value.items.len == len);
-
-                        try element.codec.decodeIntoMany(reader, gpa, config, value.items, ctx);
                     }
                 }
 
@@ -1479,6 +1877,8 @@ pub fn StdCodec(comptime V: type) type {
                 .all_void => void,
             };
 
+            const entry_codec: StdCodec(struct { hm_info.K, hm_info.V }) = .tuple(.{ std_key, std_val });
+
             return .from(.implement(EncodeCtxParam, DecodeCtxParam, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
@@ -1514,47 +1914,85 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     maybe_ctx: DecodeCtxParam,
                 ) bk.DecodeFromReaderError!void {
-                    const gpa = gpa_opt.?;
+                    try decodeImpl(reader, config, false, gpa_opt, values, decoded_count, maybe_ctx);
+                }
+
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    maybe_ctx: DecodeCtxParam,
+                ) bk.DecodeSkipError!void {
+                    try decodeImpl(reader, config, true, null, value_count, decoded_count, maybe_ctx);
+                }
+
+                fn decodeImpl(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    comptime skip: bool,
+                    gpa_opt: ?if (skip) noreturn else std.mem.Allocator,
+                    values_or_count: if (skip) usize else []V,
+                    decoded_count: *usize,
+                    maybe_ctx: DecodeCtxParam,
+                ) !void {
+                    const gpa = if (!skip) gpa_opt.?;
+
+                    const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                    const values = if (skip) blk: {
+                        var void_slice: []void = &.{};
+                        void_slice.len = value_count;
+                        break :blk void_slice;
+                    } else values_or_count;
+
                     const key_ctx, const val_ctx = unwrapKeyValCtxs(.decode, maybe_ctx);
 
                     decoded_count.* = values.len;
                     for (values, 0..) |*value, i| {
                         errdefer decoded_count.* = i;
 
-                        const len = try length.codec.decode(reader, null, config, null);
-                        try value.ensureTotalCapacity(gpa, len);
-
-                        const original_count = value.count();
-                        for (
-                            value.keys()[0..@min(len, original_count)],
-                            value.values()[0..@min(len, original_count)],
-                        ) |*k, *v| {
-                            try std_key.codec.decodeIntoOne(reader, gpa, config, k, key_ctx);
-                            try std_val.codec.decodeIntoOne(reader, gpa, config, v, val_ctx);
-                        }
-
-                        if (len < original_count) {
-                            std_key.codec.freeMany(gpa, value.keys()[len..], key_ctx);
-                            std_val.codec.freeMany(gpa, value.values()[len..], val_ctx);
-                            value.shrinkRetainingCapacity(len);
-                        }
-
-                        value.reIndex(gpa) catch |err| {
-                            freeKeysAndVals(gpa, value, maybe_ctx);
-                            value.clearRetainingCapacity();
-                            return err;
+                        const len = length.codec.decode(reader, null, config, null) catch |err| switch (err) {
+                            error.OutOfMemory => unreachable,
+                            else => |e| return e,
                         };
 
-                        if (len > original_count) for (original_count..len) |_| {
-                            const k = try std_key.codec.decode(reader, gpa, config, key_ctx);
-                            errdefer std_key.codec.free(gpa, &k, key_ctx);
+                        if (!skip) {
+                            try value.ensureTotalCapacity(gpa, len);
 
-                            const v = try std_val.codec.decode(reader, gpa, config, val_ctx);
-                            errdefer std_val.codec.free(gpa, &v, val_ctx);
+                            const original_count = value.count();
+                            for (
+                                value.keys()[0..@min(len, original_count)],
+                                value.values()[0..@min(len, original_count)],
+                            ) |*k, *v| {
+                                try std_key.codec.decodeIntoOne(reader, gpa, config, k, key_ctx);
+                                try std_val.codec.decodeIntoOne(reader, gpa, config, v, val_ctx);
+                            }
 
-                            if (value.contains(k)) return error.DecodeFailed;
-                            value.putAssumeCapacity(k, v);
-                        };
+                            if (len < original_count) {
+                                std_key.codec.freeMany(gpa, value.keys()[len..], key_ctx);
+                                std_val.codec.freeMany(gpa, value.values()[len..], val_ctx);
+                                value.shrinkRetainingCapacity(len);
+                            }
+
+                            value.reIndex(gpa) catch |err| {
+                                freeKeysAndVals(gpa, value, maybe_ctx);
+                                value.clearRetainingCapacity();
+                                return err;
+                            };
+
+                            if (len > original_count) for (original_count..len) |_| {
+                                const k = try std_key.codec.decode(reader, gpa, config, key_ctx);
+                                errdefer std_key.codec.free(gpa, &k, key_ctx);
+
+                                const v = try std_val.codec.decode(reader, gpa, config, val_ctx);
+                                errdefer std_val.codec.free(gpa, &v, val_ctx);
+
+                                if (value.contains(k)) return error.DecodeFailed;
+                                value.putAssumeCapacity(k, v);
+                            };
+                        } else {
+                            try entry_codec.codec.decodeSkip(reader, config, len, .{ key_ctx, val_ctx });
+                        }
                     }
                 }
 
@@ -1715,7 +2153,7 @@ pub fn StdCodec(comptime V: type) type {
                     .name = field.name,
                     .type = std_field.codec.EncodeCtx,
                     .default_value_ptr = if (enc_field_kind == .all_void) @ptrCast(&{}) else null,
-                    .is_comptime = false,
+                    .is_comptime = enc_field_kind == .all_void,
                     .alignment = @alignOf(std_field.codec.EncodeCtx),
                 };
 
@@ -1725,7 +2163,7 @@ pub fn StdCodec(comptime V: type) type {
                     .name = field.name,
                     .type = std_field.codec.DecodeCtx,
                     .default_value_ptr = if (dec_field_kind == .all_void) @ptrCast(&{}) else null,
-                    .is_comptime = false,
+                    .is_comptime = dec_field_kind == .all_void,
                     .alignment = @alignOf(std_field.codec.DecodeCtx),
                 };
             }
@@ -2563,7 +3001,7 @@ fn testCodecRoundTripsInner(
             var encoded_writer_state: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buffer);
             defer buffer = encoded_writer_state.toArrayList();
             const encoded_writer: *std.Io.Writer = &encoded_writer_state.writer;
-            for (values) |int| try codec.encode(encoded_writer, config, &int, enc_ctx);
+            try codec.encodeMany(encoded_writer, config, values, enc_ctx);
         }
 
         var encoded_reader: std.Io.Reader = .fixed(buffer.items);
@@ -2581,6 +3019,17 @@ fn testCodecRoundTripsInner(
             try testing.expectEqualDeepWithOverrides(expected, actual, compare_ctx);
         }
         try std.testing.expectEqual(0, encoded_reader.bufferedLen());
+
+        encoded_reader = .fixed(buffer.items);
+        var decoded_count: usize = 0;
+        try std.testing.expectEqual({}, codec.decodeSkipManyRaw(
+            &encoded_reader,
+            config,
+            values.len,
+            &decoded_count,
+            dec_ctx,
+        ));
+        try std.testing.expectEqual(values.len, decoded_count);
     }
 }
 

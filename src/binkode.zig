@@ -52,6 +52,7 @@ pub const EncodeToWriterError = EncodeError || std.Io.Writer.Error;
 pub const EncodeToSliceError = EncodeError || error{NoSpaceLeft};
 pub const DecodeFromReaderError = DecodeError || std.mem.Allocator.Error || std.Io.Reader.Error;
 pub const DecodeFromSliceError = DecodeError || std.mem.Allocator.Error || error{EndOfStream};
+pub const DecodeSkipError = DecodeError || std.Io.Reader.Error;
 
 /// This represents an encoding & decoding scheme for a value of type `V`.
 /// It is effectively a comptime-known VTable, which allows making different `Codec(V)`s
@@ -134,6 +135,24 @@ pub fn Codec(comptime V: type) type {
             /// Must be a value of type `DecodeCtx`.
             ctx: anytype,
         ) DecodeFromReaderError!void,
+
+        /// Similar to `decodeFn`, decodes a sequential list of `value_count` values, in a manner defined
+        /// by the implementation. This should behave the same as calling `decodeFn`, and then immediately
+        /// discarding the result, except without the need to store the data.
+        ///
+        /// The implementation is allowed to assume/assert `values_count != 0`.
+        /// The implementation is allowed to assume/assert `decoded_count.* != 0` initially.
+        decodeSkipFn: fn (
+            reader: *std.Io.Reader,
+            config: Config,
+            value_count: usize,
+            /// Output parameter for the number of values successfully skipped.
+            /// The only circumstance in which `values.len != decoded_count.*` is when an error returns.
+            /// Assume `decoded_count.* <= values.len`.
+            decoded_count: *usize,
+            /// Must be a value of type `DecodeCtx`.
+            ctx: anytype,
+        ) DecodeSkipError!void,
 
         /// Frees any of the resources held by each `value[i]`.
         /// Assumes `value[i]` is in a valid state as defined by the implementation,
@@ -407,6 +426,38 @@ pub fn Codec(comptime V: type) type {
             std.debug.assert(decoded_count.* == values.len);
         }
 
+        /// Skips `value_count` values.
+        pub fn decodeSkip(
+            self: CodecSelf,
+            reader: *std.Io.Reader,
+            config: Config,
+            value_count: usize,
+            ctx: self.DecodeCtx,
+        ) DecodeSkipError!void {
+            var decoded_count: usize = 0;
+            try self.decodeSkipManyRaw(reader, config, value_count, &decoded_count, ctx);
+        }
+
+        /// This function mainly concerns Codec implementations consuming other Codecs.
+        ///
+        /// Performs the same internal logic as `decodeIntoManyRaw`, except it does not store
+        /// the decoded data to memory, and instead immediately discards everything, ideally
+        /// in an efficient manner.
+        pub fn decodeSkipManyRaw(
+            self: CodecSelf,
+            reader: *std.Io.Reader,
+            config: Config,
+            value_count: usize,
+            decoded_count: *usize,
+            ctx: self.DecodeCtx,
+        ) DecodeSkipError!void {
+            decoded_count.* = 0;
+            if (value_count == 0) return;
+            defer std.debug.assert(decoded_count.* <= value_count);
+            try self.decodeSkipFn(reader, config, value_count, decoded_count, ctx);
+            std.debug.assert(decoded_count.* == value_count);
+        }
+
         /// Frees any of the resources held by `value.*`.
         /// Expects `value.*` to be in a valid state as defined by the implementation.
         /// Does not free the `value` as a pointer.
@@ -458,6 +509,7 @@ pub fn Codec(comptime V: type) type {
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = if (@TypeOf(methods.decodeInit) != @TypeOf(null)) erased.decodeInit else null,
                 .decodeFn = erased.decode,
+                .decodeSkipFn = erased.decodeSkip,
                 .freeFn = if (@TypeOf(methods.free) != @TypeOf(null)) erased.free else null,
             };
         }
@@ -514,6 +566,25 @@ pub fn Codec(comptime V: type) type {
                     std.debug.assert(values.len != 0);
                     std.debug.assert(decoded_count.* == 0);
                     try methods.decode(reader, config, gpa_opt, values, decoded_count, ctx);
+                }
+
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: Config,
+                    value_count: usize,
+                    /// Output parameter for the number of values successfully skipped.
+                    /// The only circumstance in which `values.len != decoded_count.*` is when an error returns.
+                    /// Assume `decoded_count.* <= values.len`.
+                    decoded_count: *usize,
+                    /// Must be a value of type `DecodeCtx`.
+                    ctx: anytype,
+                ) DecodeSkipError!void {
+                    if (@TypeOf(ctx) != DecodeCtx) @compileError(
+                        "Expected type " ++ @typeName(DecodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
+                    );
+                    std.debug.assert(value_count != 0);
+                    std.debug.assert(decoded_count.* == 0);
+                    try methods.decodeSkip(reader, config, value_count, decoded_count, ctx);
                 }
 
                 pub fn free(
