@@ -739,15 +739,15 @@ pub fn StdCodec(comptime V: type) type {
                     comptime if (!any_decode_init) unreachable;
                     for (values, 0..) |*value, value_i| {
                         errdefer for (values[0..value_i]) |*prev| {
-                            freeFieldSubset(s_fields.len, ctx, gpa_opt, prev);
+                            freeFieldSubset(s_fields.len, gpa_opt, prev, ctx);
                         };
 
                         inline for (s_fields, 0..) |s_field, s_field_i| {
-                            errdefer freeFieldSubset(s_field_i, ctx, gpa_opt, value);
-                            const field_codec: StdCodec(s_field.type) = @field(field_codecs, s_field.name);
-                            const field_ctx = getFieldCtx(ctx, s_field.name);
+                            errdefer freeFieldSubset(s_field_i, gpa_opt, value, ctx);
+                            const field: StdCodec(s_field.type) = @field(field_codecs, s_field.name);
+                            const field_ctx = getFieldCtx(ctx, s_field.name, field.codec.DecodeCtx);
                             const field_ptr = &@field(value, s_field.name);
-                            try field_codec.decodeInitOne(field_ctx, gpa_opt, field_ptr);
+                            try field.codec.decodeInitOne(gpa_opt, field_ptr, field_ctx);
                         }
                     }
                 }
@@ -814,7 +814,7 @@ pub fn StdCodec(comptime V: type) type {
                 ) void {
                     comptime if (!any_free) unreachable;
                     for (values) |*value| {
-                        freeFieldSubset(s_fields.len, gpa_opt, value, ctx, .all);
+                        freeFieldSubset(s_fields.len, gpa_opt, value, ctx);
                     }
                 }
 
@@ -2092,31 +2092,34 @@ pub fn StdCodec(comptime V: type) type {
         /// has a type `StdCodec(@FieldType(V, field_name))`, where `field_name` is the corresponding name
         /// of the field.
         /// If `V` is a tuple, this is also a tuple.
-        pub const Fields = switch (@typeInfo(V)) {
-            inline //
-            .@"struct",
-            .@"union",
-            => |info, tag| @Type(.{ .@"struct" = .{
-                .layout = .auto,
-                .backing_integer = null,
-                .is_tuple = tag == .@"struct" and info.is_tuple,
-                .decls = &.{},
-                .fields = fields: {
-                    var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-                    for (&fields, info.fields) |*ctx_field, v_field| {
-                        const FieldCodec = StdCodec(v_field.type);
-                        ctx_field.* = .{
-                            .name = v_field.name,
-                            .type = FieldCodec,
-                            .default_value_ptr = null,
-                            .is_comptime = false,
-                            .alignment = @alignOf(FieldCodec),
-                        };
-                    }
-                    break :fields &fields;
-                },
-            } }),
-            else => @compileError(@typeName(V) ++ " is not a struct or a union"),
+        pub const Fields = blk: {
+            switch (@typeInfo(V)) {
+                inline //
+                .@"struct",
+                .@"union",
+                => |info, tag| break :blk @Type(.{ .@"struct" = .{
+                    .layout = .auto,
+                    .backing_integer = null,
+                    .is_tuple = tag == .@"struct" and info.is_tuple,
+                    .decls = &.{},
+                    .fields = fields: {
+                        var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
+                        for (&fields, info.fields) |*ctx_field, v_field| {
+                            const FieldCodec = StdCodec(v_field.type);
+                            ctx_field.* = .{
+                                .name = v_field.name,
+                                .type = FieldCodec,
+                                .default_value_ptr = null,
+                                .is_comptime = false,
+                                .alignment = @alignOf(FieldCodec),
+                            };
+                        }
+                        break :fields &fields;
+                    },
+                } }),
+                else => {},
+            }
+            @compileError(@typeName(V) ++ " is not a struct or a union");
         };
 
         pub fn FieldContexts(field_codecs: Fields) struct {
@@ -2488,10 +2491,11 @@ test "tuple" {
         a: u32,
         b: f64,
 
-        const bk_codec: bk.Codec(@This()) = .standard(.tuple(.{
+        const bk_codec: bk.Codec(@This()) = .standard(.tuple(bk_codec_fields));
+        const bk_codec_fields: bk.StdCodec(@This()).Fields = .{
             .a = .int,
             .b = .float,
-        }));
+        };
     };
 
     const struct_test_edge_cases = comptime blk: {
