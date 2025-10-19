@@ -67,7 +67,8 @@ pub fn Codec(comptime V: type) type {
         /// Encodes all `values[i]` to the `writer` stream sequentially, in a manner defined by the implementation.
         /// The implementation should treat each `values[i]` as independent from all other `values[j]`.
         ///
-        /// The implementation is allowed to assume/assert `values.len != 0`.
+        /// The implementation is allowed to assume/assert the following invariants:
+        /// * `values.len != 0`.
         encodeFn: fn (
             writer: *std.Io.Writer,
             config: Config,
@@ -97,7 +98,8 @@ pub fn Codec(comptime V: type) type {
         ///
         /// If this is null, the implementation assumes it will be overwriting undefined data in `decodeFn`.
         ///
-        /// The implementation is allowed to assume/assert `values.len != 0`.
+        /// The implementation is allowed to assume/assert the following invariants:
+        /// * `values.len != 0`.
         decodeInitFn: ?fn (
             gpa_opt: ?std.mem.Allocator,
             /// Should be assumed to be undefined by the implementation, which should set
@@ -116,8 +118,9 @@ pub fn Codec(comptime V: type) type {
         /// `values[decoded_count.*..]` is only expected to be comprised of valid values if
         /// `decodeInitFn != null`; if it is, the caller is also responsible for freeing it.
         ///
-        /// The implementation is allowed to assume/assert `values.len != 0`.
-        /// The implementation is allowed to assume/assert `decoded_count.* != 0` initially.
+        /// The implementation is allowed to assume/assert the following invariants:
+        /// * `values.len != 0`.
+        /// * `decoded_count.* != 0`, initially.
         decodeFn: fn (
             reader: *std.Io.Reader,
             gpa_opt: ?std.mem.Allocator,
@@ -140,8 +143,9 @@ pub fn Codec(comptime V: type) type {
         /// by the implementation. This should behave the same as calling `decodeFn`, and then immediately
         /// discarding the result, except without the need to store the data.
         ///
-        /// The implementation is allowed to assume/assert `values_count != 0`.
-        /// The implementation is allowed to assume/assert `decoded_count.* != 0` initially.
+        /// The implementation is allowed to assume/assert the following invariants:
+        /// * `values.len != 0`.
+        /// * `decoded_count.* != 0`, initially.
         decodeSkipFn: fn (
             reader: *std.Io.Reader,
             config: Config,
@@ -161,7 +165,8 @@ pub fn Codec(comptime V: type) type {
         /// If this is null, the `free` method is a noop, meaning the implementation does not
         /// need to free any resources.
         ///
-        /// The implementation is allowed to assume/assert `values.len != 0`.
+        /// The implementation is allowed to assume/assert the following invariants:
+        /// * `values.len != 0`.
         freeFn: ?fn (
             gpa_opt: ?std.mem.Allocator,
             values: []const V,
@@ -178,7 +183,7 @@ pub fn Codec(comptime V: type) type {
             value: *const V,
             ctx: self.EncodeCtx,
         ) EncodeToWriterError!void {
-            return self.encodeMany(writer, config, @ptrCast(value), ctx);
+            try self.encodeMany(writer, config, @ptrCast(value), ctx);
         }
 
         /// Encodes each `values[i]` to the `writer` stream sequentially.
@@ -190,7 +195,7 @@ pub fn Codec(comptime V: type) type {
             ctx: self.EncodeCtx,
         ) EncodeToWriterError!void {
             if (values.len == 0) return;
-            return self.encodeFn(writer, config, values, ctx);
+            try self.encodeFn(writer, config, values, ctx);
         }
 
         /// Returns the number of bytes occupied by the encoded representation of `value.*`.
@@ -341,7 +346,7 @@ pub fn Codec(comptime V: type) type {
         ) std.mem.Allocator.Error!void {
             const decodeInitFn = self.decodeInitFn orelse return;
             if (values.len == 0) return;
-            return try decodeInitFn(gpa_opt, values, ctx);
+            try decodeInitFn(gpa_opt, values, ctx);
         }
 
         /// Same as `decodeIntoOne`, but takes a slice directly as input.
@@ -373,7 +378,7 @@ pub fn Codec(comptime V: type) type {
             value: *V,
             ctx: self.DecodeCtx,
         ) DecodeFromReaderError!void {
-            return self.decodeIntoMany(reader, gpa_opt, config, @ptrCast(value), ctx);
+            try self.decodeIntoMany(reader, gpa_opt, config, @ptrCast(value), ctx);
         }
 
         /// Decodes into `values[i]` from the `reader` stream.
