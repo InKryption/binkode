@@ -14,8 +14,8 @@ comptime {
 }
 
 pub const IntEncoding = enum {
-    varint,
     fixint,
+    varint,
 };
 
 pub const Config = struct {
