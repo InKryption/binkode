@@ -211,6 +211,154 @@ pub fn StdCodec(comptime V: type) type {
         /// Failure to decode indicates that the value overflowed.
         /// Decode's initial state is write-only.
         pub const int: StdCodecSelf = .from(.implement(void, ?*IntDecodeDiag, struct {
+            pub fn encode(
+                writer: *std.Io.Writer,
+                config: bk.Config,
+                values: []const V,
+                _: void,
+            ) bk.EncodeToWriterError!void {
+                switch (config.int) {
+                    .fixint => try fixint.codec.encodeMany(writer, config, values, {}),
+                    .varint => try varint.codec.encodeMany(writer, config, values, {}),
+                }
+            }
+
+            pub const decodeInit = null;
+
+            pub fn decode(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                _: ?std.mem.Allocator,
+                values: []V,
+                decoded_count: *usize,
+                maybe_diag: ?*IntDecodeDiag,
+            ) bk.DecodeFromReaderError!void {
+                try decodeImpl(reader, config, false, values, decoded_count, maybe_diag);
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                maybe_diag: ?*IntDecodeDiag,
+            ) bk.DecodeSkipError!void {
+                try decodeImpl(reader, config, true, value_count, decoded_count, maybe_diag);
+            }
+
+            fn decodeImpl(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                comptime skip: bool,
+                values_or_count: if (skip) usize else []V,
+                decoded_count: *usize,
+                maybe_diag: ?*IntDecodeDiag,
+            ) !void {
+                switch (config.int) {
+                    inline .fixint, .varint => |which| {
+                        const int_codec: Base = comptime switch (which) {
+                            .fixint => fixint.codec,
+                            .varint => varint.codec,
+                        };
+                        if (!skip) {
+                            try int_codec.decodeIntoManyRaw(
+                                reader,
+                                null,
+                                config,
+                                values_or_count,
+                                decoded_count,
+                                maybe_diag,
+                            );
+                        } else {
+                            try int_codec.decodeSkipManyRaw(
+                                reader,
+                                config,
+                                values_or_count,
+                                decoded_count,
+                                maybe_diag,
+                            );
+                        }
+                    },
+                }
+            }
+
+            pub const free = null;
+        }));
+
+        pub const fixint: StdCodecSelf = .from(.implement(void, ?*IntDecodeDiag, struct {
+            const Int = switch (V) {
+                usize => u64,
+                isize => i64,
+                else => V,
+            };
+
+            pub fn encode(
+                writer: *std.Io.Writer,
+                config: bk.Config,
+                values: []const V,
+                _: void,
+            ) bk.EncodeToWriterError!void {
+                try writer.writeSliceEndian(V, values, config.endian);
+            }
+
+            pub const decodeInit = null;
+
+            pub fn decode(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                _: ?std.mem.Allocator,
+                values: []V,
+                decoded_count: *usize,
+                maybe_diag: ?*IntDecodeDiag,
+            ) bk.DecodeFromReaderError!void {
+                try decodeImpl(reader, config, false, values, decoded_count, maybe_diag);
+            }
+
+            pub fn decodeSkip(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                value_count: usize,
+                decoded_count: *usize,
+                maybe_diag: ?*IntDecodeDiag,
+            ) bk.DecodeSkipError!void {
+                try decodeImpl(reader, config, true, value_count, decoded_count, maybe_diag);
+            }
+
+            fn decodeImpl(
+                reader: *std.Io.Reader,
+                config: bk.Config,
+                comptime skip: bool,
+                values_or_count: if (skip) usize else []V,
+                decoded_count: *usize,
+                maybe_diag: ?*IntDecodeDiag,
+            ) !void {
+                const value_count: usize = if (skip) values_or_count else values_or_count.len;
+                const values = if (skip) blk: {
+                    var void_slice: []void = &.{};
+                    void_slice.len = value_count;
+                    break :blk void_slice;
+                } else values_or_count;
+
+                decoded_count.* = value_count;
+                for (values, 0..value_count) |*value, index| {
+                    errdefer decoded_count.* = index;
+
+                    var int_bytes: [@sizeOf(Int)]u8 = undefined;
+                    try reader.readSliceAll(&int_bytes);
+                    const decoded_int = std.mem.readInt(Int, &int_bytes, config.endian);
+                    if (std.math.minInt(V) > decoded_int or decoded_int > std.math.maxInt(V)) {
+                        if (maybe_diag) |diag| diag.raw_int = decoded_int;
+                        decoded_count.* = index;
+                        return error.DecodeFailed;
+                    }
+                    if (!skip) value.* = @intCast(decoded_int);
+                }
+            }
+
+            pub const free = null;
+        }));
+
+        pub const varint: StdCodecSelf = .from(.implement(void, ?*IntDecodeDiag, struct {
             const signedness = @typeInfo(V).int.signedness;
             const Int = blk: {
                 switch (V) {
@@ -239,21 +387,14 @@ pub fn StdCodec(comptime V: type) type {
                 values: []const V,
                 _: void,
             ) bk.EncodeToWriterError!void {
-                switch (config.int) {
-                    .fixint => {
-                        try writer.writeSliceEndian(V, values, config.endian);
-                    },
-                    .varint => {
-                        for (values) |value| {
-                            const unsigned_int = switch (signedness) {
-                                .signed => bk.varint.zigzag.signedToUnsigned(Int, value),
-                                .unsigned => value,
-                            };
-                            var buffer: [bk.varint.IntKind.fullEncodedLen(.maximum)]u8 = undefined;
-                            const int_kind = bk.varint.encode(unsigned_int, &buffer, config.endian);
-                            try writer.writeAll(buffer[0..int_kind.fullEncodedLen()]);
-                        }
-                    },
+                for (values) |value| {
+                    const unsigned_int = switch (signedness) {
+                        .signed => bk.varint.zigzag.signedToUnsigned(Int, value),
+                        .unsigned => value,
+                    };
+                    var buffer: [bk.varint.IntKind.fullEncodedLen(.maximum)]u8 = undefined;
+                    const int_kind = bk.varint.encode(unsigned_int, &buffer, config.endian);
+                    try writer.writeAll(buffer[0..int_kind.fullEncodedLen()]);
                 }
             }
 
@@ -296,48 +437,33 @@ pub fn StdCodec(comptime V: type) type {
                 } else values_or_count;
 
                 decoded_count.* = value_count;
-                switch (config.int) {
-                    .fixint => for (values, 0..value_count) |*value, index| {
-                        errdefer decoded_count.* = index;
+                for (values, 0..value_count) |*value, index| {
+                    errdefer decoded_count.* = index;
 
-                        var int_bytes: [@sizeOf(Int)]u8 = undefined;
-                        try reader.readSliceAll(&int_bytes);
-                        const decoded_int = std.mem.readInt(Int, &int_bytes, config.endian);
-                        if (std.math.minInt(V) > decoded_int or decoded_int > std.math.maxInt(V)) {
-                            if (maybe_diag) |diag| diag.raw_int = decoded_int;
-                            decoded_count.* = index;
-                            return error.DecodeFailed;
-                        }
-                        if (!skip) value.* = @intCast(decoded_int);
-                    },
-                    .varint => for (values, 0..value_count) |*value, index| {
-                        errdefer decoded_count.* = index;
-
-                        const raw_int = try bk.varint.decodeReader(reader, config.endian);
-                        switch (signedness) {
-                            .unsigned => {
-                                if (raw_int > std.math.maxInt(V)) {
-                                    if (maybe_diag) |diag| diag.raw_int = raw_int;
-                                    return error.DecodeFailed;
-                                }
-                                if (!skip) value.* = @intCast(raw_int);
-                            },
-                            .signed => {
-                                const EncodedInt = bk.varint.zigzag.SignedAsUnsigned(Int);
-                                if (raw_int > std.math.maxInt(EncodedInt)) {
-                                    if (maybe_diag) |diag| diag.raw_int = bk.varint.zigzag.signedFromUnsigned(i256, raw_int);
-                                    return error.DecodeFailed;
-                                }
-                                const encoded_int_unsigned: EncodedInt = @intCast(raw_int);
-                                const decoded_int: Int = bk.varint.zigzag.signedFromUnsigned(Int, encoded_int_unsigned);
-                                if (std.math.minInt(V) > decoded_int or decoded_int > std.math.maxInt(V)) {
-                                    if (maybe_diag) |diag| diag.raw_int = decoded_int;
-                                    return error.DecodeFailed;
-                                }
-                                if (!skip) value.* = @intCast(decoded_int);
-                            },
-                        }
-                    },
+                    const raw_int = try bk.varint.decodeReader(reader, config.endian);
+                    switch (signedness) {
+                        .unsigned => {
+                            if (raw_int > std.math.maxInt(V)) {
+                                if (maybe_diag) |diag| diag.raw_int = raw_int;
+                                return error.DecodeFailed;
+                            }
+                            if (!skip) value.* = @intCast(raw_int);
+                        },
+                        .signed => {
+                            const EncodedInt = bk.varint.zigzag.SignedAsUnsigned(Int);
+                            if (raw_int > std.math.maxInt(EncodedInt)) {
+                                if (maybe_diag) |diag| diag.raw_int = bk.varint.zigzag.signedFromUnsigned(i256, raw_int);
+                                return error.DecodeFailed;
+                            }
+                            const encoded_int_unsigned: EncodedInt = @intCast(raw_int);
+                            const decoded_int: Int = bk.varint.zigzag.signedFromUnsigned(Int, encoded_int_unsigned);
+                            if (std.math.minInt(V) > decoded_int or decoded_int > std.math.maxInt(V)) {
+                                if (maybe_diag) |diag| diag.raw_int = decoded_int;
+                                return error.DecodeFailed;
+                            }
+                            if (!skip) value.* = @intCast(decoded_int);
+                        },
+                    }
                 }
             }
 
