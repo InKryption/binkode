@@ -80,6 +80,10 @@ pub fn Codec(comptime V: type) type {
             ctx: anytype,
         ) EncodeToWriterError!usize,
 
+        /// The minimum number of encoded bytes that `encodeFn` must be allowed to write.
+        /// The implementation may still write fewer encoded bytes than this.
+        encode_min_size: usize,
+
         /// The type of the context consumed by `decodeInitFn`, `decodeFn`, and `freeFn`.
         DecodeCtx: type,
 
@@ -541,6 +545,7 @@ pub fn Codec(comptime V: type) type {
             return .{
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
+                .encode_min_size = methods.encode_min_size,
 
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = if (@TypeOf(methods.decodeInit) != @TypeOf(null)) erased.decodeInit else null,
@@ -575,6 +580,8 @@ pub fn Codec(comptime V: type) type {
                     std.debug.assert(values.len != 0);
                     return try methods.encode(writer, config, values, ctx);
                 }
+
+                pub const encode_min_size: usize = methods.encode_min_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,

@@ -165,6 +165,18 @@ pub const zigzag = struct {
         } });
     }
 
+    /// If `Int` is signed, returns `signedToUnsigned(Int, int)`.
+    /// If `Int` is unsigned, returns `int`.
+    pub fn anyToUnsigned(comptime Int: type, int: Int) switch (@typeInfo(Int).int.signedness) {
+        .signed => SignedAsUnsigned(Int),
+        .unsigned => Int,
+    } {
+        return switch (@typeInfo(Int).int.signedness) {
+            .signed => signedToUnsigned(Int, int),
+            .unsigned => int,
+        };
+    }
+
     /// Encodes a signed integer as an unsigned integer, such that values
     /// which are closer to zero are mapped to a smaller unsigned integer.
     /// This is used in the varint encoding scheme, where otherwise all
