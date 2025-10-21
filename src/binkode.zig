@@ -67,6 +67,9 @@ pub fn Codec(comptime V: type) type {
         /// Encodes all `values[i]` to the `writer` stream sequentially, in a manner defined by the implementation.
         /// The implementation should treat each `values[i]` as independent from all other `values[j]`.
         ///
+        /// Returns the number of `values` that were successfully encoded; implementations may choose to encode however
+        /// many they want to. Must be at least 1.
+        ///
         /// The implementation is allowed to assume/assert the following invariants:
         /// * `values.len != 0`.
         encodeFn: fn (
@@ -75,7 +78,7 @@ pub fn Codec(comptime V: type) type {
             values: []const V,
             /// Must be a value of type `EncodeCtx`.
             ctx: anytype,
-        ) EncodeToWriterError!void,
+        ) EncodeToWriterError!usize,
 
         /// The type of the context consumed by `decodeInitFn`, `decodeFn`, and `freeFn`.
         DecodeCtx: type,
@@ -120,7 +123,7 @@ pub fn Codec(comptime V: type) type {
         ///
         /// The implementation is allowed to assume/assert the following invariants:
         /// * `values.len != 0`.
-        /// * `decoded_count.* != 0`, initially.
+        /// * `decoded_count.* == 0`, initially.
         decodeFn: fn (
             reader: *std.Io.Reader,
             gpa_opt: ?std.mem.Allocator,
@@ -195,7 +198,33 @@ pub fn Codec(comptime V: type) type {
             ctx: self.EncodeCtx,
         ) EncodeToWriterError!void {
             if (values.len == 0) return;
-            try self.encodeFn(writer, config, values, ctx);
+
+            // since each partial call must encode a minimum of one value,
+            // there is an upper bound on these iterations of `values.len`.
+            var count: usize = 0;
+            for (0..values.len) |_| {
+                const remaining = values[count..];
+                const incr = try self.encodeManyPartialRaw(writer, config, remaining, ctx);
+                // sanity checks
+                std.debug.assert(incr != 0);
+                std.debug.assert(incr <= remaining.len);
+                std.debug.assert(count + incr <= values.len);
+                count += incr;
+                if (count == values.len) break;
+            } else unreachable;
+        }
+
+        pub fn encodeManyPartialRaw(
+            self: CodecSelf,
+            writer: *std.Io.Writer,
+            config: Config,
+            values: []const V,
+            ctx: self.EncodeCtx,
+        ) EncodeToWriterError!usize {
+            if (values.len == 0) return 0;
+            const value_count = try self.encodeFn(writer, config, values, ctx);
+            std.debug.assert(value_count <= values.len);
+            return value_count;
         }
 
         /// Returns the number of bytes occupied by the encoded representation of `value.*`.
@@ -486,9 +515,11 @@ pub fn Codec(comptime V: type) type {
             freeFn(gpa_opt, values, ctx);
         }
 
+        pub const Standard = StdCodec(V);
+
         /// Construct a codec from a composition of standard codecs for an assortment of types,
         /// defined to behave in line with the bincode specification.
-        pub fn standard(constructor: StdCodec(V)) CodecSelf {
+        pub fn standard(constructor: Standard) CodecSelf {
             return constructor.codec;
         }
 
@@ -537,12 +568,12 @@ pub fn Codec(comptime V: type) type {
                     config: Config,
                     values: []const V,
                     ctx: anytype,
-                ) EncodeToWriterError!void {
+                ) EncodeToWriterError!usize {
                     if (@TypeOf(ctx) != EncodeCtx) @compileError(
                         "Expected type " ++ @typeName(EncodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
                     );
                     std.debug.assert(values.len != 0);
-                    try methods.encode(writer, config, values, ctx);
+                    return try methods.encode(writer, config, values, ctx);
                 }
 
                 pub fn decodeInit(
