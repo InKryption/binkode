@@ -39,6 +39,8 @@ pub fn StdCodec(comptime V: type) type {
                 return values.len;
             }
 
+            pub const encode_min_size: usize = 0;
+
             pub const decodeInit = null;
 
             pub fn decode(
@@ -84,6 +86,8 @@ pub fn StdCodec(comptime V: type) type {
                 try writer.writeAll(values);
                 return values.len;
             }
+
+            pub const encode_min_size: usize = 1;
 
             pub const decodeInit = null;
 
@@ -136,6 +140,8 @@ pub fn StdCodec(comptime V: type) type {
                 try writer.writeAll(@ptrCast(values));
                 return values.len;
             }
+
+            pub const encode_min_size: usize = 1;
 
             pub const decodeInit = null;
 
@@ -225,6 +231,11 @@ pub fn StdCodec(comptime V: type) type {
                 };
             }
 
+            pub const encode_min_size: usize = @max(
+                fixint.codec.encode_min_size,
+                varint.codec.encode_min_size,
+            );
+
             pub const decodeInit = null;
 
             pub fn decode(
@@ -303,6 +314,8 @@ pub fn StdCodec(comptime V: type) type {
                 try writer.writeSliceEndian(V, values, config.endian);
                 return values.len;
             }
+
+            pub const encode_min_size: usize = @sizeOf(Int);
 
             pub const decodeInit = null;
 
@@ -402,6 +415,12 @@ pub fn StdCodec(comptime V: type) type {
                 return values.len;
             }
 
+            pub const encode_min_size: usize = @max(
+                bk.varint.IntKind.fullEncodedLen(.fromValue(std.math.maxInt(V))),
+                bk.varint.IntKind.fullEncodedLen(.fromValue(bk.varint.zigzag.anyToUnsigned(V, std.math.maxInt(V)))),
+                bk.varint.IntKind.fullEncodedLen(.fromValue(bk.varint.zigzag.anyToUnsigned(V, std.math.minInt(V)))),
+            );
+
             pub const decodeInit = null;
 
             pub fn decode(
@@ -496,6 +515,8 @@ pub fn StdCodec(comptime V: type) type {
                 return values.len;
             }
 
+            pub const encode_min_size: usize = @sizeOf(V);
+
             pub const decodeInit = null;
 
             pub fn decode(
@@ -574,6 +595,8 @@ pub fn StdCodec(comptime V: type) type {
                     else => comptime unreachable,
                 }
             }
+
+            pub const encode_min_size: usize = 4;
 
             pub const decodeInit = null;
 
@@ -704,6 +727,11 @@ pub fn StdCodec(comptime V: type) type {
                     return 1;
                 }
 
+                pub const encode_min_size: usize = @max(
+                    boolean.codec.encode_min_size,
+                    payload.encode_min_size,
+                );
+
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
                     values: []V,
@@ -810,6 +838,7 @@ pub fn StdCodec(comptime V: type) type {
             return .from(.{
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
+                .encode_min_size = erased.encode_min_size,
 
                 .DecodeCtx = DecodeCtxParam,
                 .decodeInitFn = if (decode_init_defined) erased.decodeInit else null,
@@ -820,12 +849,12 @@ pub fn StdCodec(comptime V: type) type {
         }
 
         pub fn TupleEncodeCtx(field_codecs: Fields) type {
-            const EncodeCtx, _, _, _ = FieldContexts(field_codecs);
+            const EncodeCtx, _, _, _, _ = FieldContexts(field_codecs);
             return EncodeCtx;
         }
 
         pub fn TupleDecodeCtx(field_codecs: Fields) type {
-            _, const DecodeCtx, _, _ = FieldContexts(field_codecs);
+            _, const DecodeCtx, _, _, _ = FieldContexts(field_codecs);
             return DecodeCtx;
         }
 
@@ -842,7 +871,8 @@ pub fn StdCodec(comptime V: type) type {
             const EncodeCtx, //
             const DecodeCtx, //
             const decode_init_req, //
-            const free_req //
+            const free_req, //
+            const max_encode_min_size //
             = FieldContexts(field_codecs);
 
             const any_decode_init = decode_init_req == .need_decode_init;
@@ -864,6 +894,8 @@ pub fn StdCodec(comptime V: type) type {
                     }
                     return 1;
                 }
+
+                pub const encode_min_size: usize = max_encode_min_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -987,6 +1019,7 @@ pub fn StdCodec(comptime V: type) type {
             return .from(.{
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
+                .encode_min_size = erased.encode_min_size,
 
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = if (any_decode_init) erased.decodeInit else null,
@@ -999,7 +1032,7 @@ pub fn StdCodec(comptime V: type) type {
         pub fn TaggedUnionDecodeCtx(
             payload_codecs: Fields,
         ) type {
-            _, const PayloadDecodeCtx, _, _ = FieldContexts(payload_codecs);
+            _, const PayloadDecodeCtx, _, _, _ = FieldContexts(payload_codecs);
             return TaggedUnionDecodeCtxGeneric(PayloadDecodeCtx);
         }
 
@@ -1040,7 +1073,8 @@ pub fn StdCodec(comptime V: type) type {
             const EncodeCtx, //
             const PayloadDecodeCtx, //
             _, //
-            const free_req //
+            const free_req, //
+            const max_encode_min_size //
             = FieldContexts(payload_codecs);
             const DecodeCtx = TaggedUnionDecodeCtxGeneric(PayloadDecodeCtx);
 
@@ -1054,7 +1088,7 @@ pub fn StdCodec(comptime V: type) type {
 
             const erased = Base.ImplementMethods(EncodeCtx, DecodeCtxParam, struct {
                 const TaggedUnionImpl = @This();
-                const std_tag: StdCodec(Tag) = .discriminant;
+                const tag_codec: bk.Codec(Tag) = .standard(.discriminant);
 
                 pub fn encode(
                     writer: *std.Io.Writer,
@@ -1064,7 +1098,7 @@ pub fn StdCodec(comptime V: type) type {
                 ) bk.EncodeToWriterError!usize {
                     const value = &values[0];
                     const current_tag: union_info.tag_type.? = value.*;
-                    try std_tag.codec.encode(writer, config, &current_tag, {});
+                    try tag_codec.encode(writer, config, &current_tag, {});
                     switch (value.*) {
                         inline else => |*payload_ptr, itag| {
                             const Payload = @TypeOf(payload_ptr.*);
@@ -1083,6 +1117,11 @@ pub fn StdCodec(comptime V: type) type {
                     }
                     return 1;
                 }
+
+                pub const encode_min_size: usize = @max(
+                    tag_codec.encode_min_size,
+                    max_encode_min_size,
+                );
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -1153,7 +1192,7 @@ pub fn StdCodec(comptime V: type) type {
                     for (values, 0..value_count) |*value, i| {
                         errdefer decoded_count.* = i;
 
-                        const tag = std_tag.codec.decode(reader, null, config, ctx.diag) catch |err| switch (err) {
+                        const tag = tag_codec.decode(reader, null, config, ctx.diag) catch |err| switch (err) {
                             error.OutOfMemory => unreachable,
                             else => |e| return e,
                         };
@@ -1245,6 +1284,7 @@ pub fn StdCodec(comptime V: type) type {
             return .from(.{
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
+                .encode_min_size = erased.encode_min_size,
 
                 .DecodeCtx = DecodeCtxParam,
                 .decodeInitFn = if (decode_init_tag_opt != null) erased.decodeInit else null,
@@ -1299,6 +1339,8 @@ pub fn StdCodec(comptime V: type) type {
                     return 1;
                 }
             }
+
+            pub const encode_min_size: usize = u32_codec.encode_min_size;
 
             pub const decodeInit = null;
 
@@ -1396,6 +1438,8 @@ pub fn StdCodec(comptime V: type) type {
                     return 1;
                 }
 
+                pub const encode_min_size: usize = element.codec.encode_min_size;
+
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
                     values: []V,
@@ -1462,6 +1506,7 @@ pub fn StdCodec(comptime V: type) type {
             return .from(.{
                 .EncodeCtx = element.codec.EncodeCtx,
                 .encodeFn = erased.encode,
+                .encode_min_size = erased.encode_min_size,
 
                 .DecodeCtx = element.codec.DecodeCtx,
                 .decodeInitFn = if (element.codec.decodeInitFn != null) erased.decodeInit else null,
@@ -1500,6 +1545,8 @@ pub fn StdCodec(comptime V: type) type {
                     try child.codec.encode(writer, config, values[0], ctx);
                     return 1;
                 }
+
+                pub const encode_min_size: usize = child.codec.encode_min_size;
 
                 pub const decodeInit = null;
 
@@ -1581,6 +1628,11 @@ pub fn StdCodec(comptime V: type) type {
                     try element.codec.encodeMany(writer, config, value, ctx);
                     return 1;
                 }
+
+                pub const encode_min_size: usize = @max(
+                    length.codec.encode_min_size,
+                    element.codec.encode_min_size,
+                );
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -1697,6 +1749,7 @@ pub fn StdCodec(comptime V: type) type {
             return .from(.{
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
+                .encode_min_size = erased.encode_min_size,
 
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = erased.decodeInit,
@@ -1720,7 +1773,7 @@ pub fn StdCodec(comptime V: type) type {
                     );
                 }
 
-                const std_array: StdCodec(ptr_info.child) = .array(element);
+                const array_codec: bk.Codec(ptr_info.child) = .standard(.array(element));
 
                 pub fn encode(
                     writer: *std.Io.Writer,
@@ -1730,9 +1783,14 @@ pub fn StdCodec(comptime V: type) type {
                 ) bk.EncodeToWriterError!usize {
                     const value = values[0];
                     try length.codec.encode(writer, config, &value.len, ctx);
-                    try std_array.codec.encode(writer, config, value, ctx);
+                    try array_codec.encode(writer, config, value, ctx);
                     return 1;
                 }
+
+                pub const encode_min_size: usize = @max(
+                    length.codec.encode_min_size,
+                    array_codec.encode_min_size,
+                );
 
                 pub const decodeInit = null;
 
@@ -1794,10 +1852,10 @@ pub fn StdCodec(comptime V: type) type {
                             ))[0..expected_len];
                             errdefer gpa.free(array_ptr);
 
-                            try std_array.codec.decodeIntoOne(reader, gpa, config, array_ptr, ctx);
+                            try array_codec.decodeIntoOne(reader, gpa, config, array_ptr, ctx);
                             value.* = array_ptr;
                         } else {
-                            try std_array.codec.decodeSkip(reader, config, 1, ctx);
+                            try array_codec.decodeSkip(reader, config, 1, ctx);
                         }
                     }
                 }
@@ -1809,7 +1867,7 @@ pub fn StdCodec(comptime V: type) type {
                 ) void {
                     const gpa = gpa_opt.?;
                     for (array_ptr_list) |array_ptr_value| {
-                        std_array.codec.free(gpa_opt, array_ptr_value, ctx);
+                        array_codec.free(gpa_opt, array_ptr_value, ctx);
                         gpa.free(array_ptr_value);
                     }
                 }
@@ -1837,6 +1895,8 @@ pub fn StdCodec(comptime V: type) type {
                 maybe_array_list_info.?.alignment,
             );
 
+            const slice_codec: bk.Codec(ArrayList.Slice) = .standard(.slice(element));
+
             const EncodeCtx = element.codec.EncodeCtx;
             const DecodeCtx = element.codec.DecodeCtx;
             return .from(.implement(EncodeCtx, DecodeCtx, struct {
@@ -1846,11 +1906,12 @@ pub fn StdCodec(comptime V: type) type {
                     values: []const ArrayList,
                     ctx: EncodeCtx,
                 ) bk.EncodeToWriterError!usize {
-                    const slice_codec: bk.Codec(ArrayList.Slice) = .standard(.slice(element));
                     const value = &values[0];
                     try slice_codec.encode(writer, config, &value.items, ctx);
                     return 1;
                 }
+
+                pub const encode_min_size: usize = slice_codec.encode_min_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -2029,6 +2090,12 @@ pub fn StdCodec(comptime V: type) type {
                     }
                     return 1;
                 }
+
+                pub const encode_min_size: usize = @max(
+                    length.codec.encode_min_size,
+                    std_key.codec.encode_min_size,
+                    std_val.codec.encode_min_size,
+                );
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -2260,6 +2327,7 @@ pub fn StdCodec(comptime V: type) type {
             type,
             enum { need_decode_init, no_decode_init },
             enum { need_free, no_free },
+            usize, // max_encode_min_size
         } {
             const fields, const is_tuple = switch (@typeInfo(V)) {
                 .@"struct" => |s_info| .{ s_info.fields, s_info.is_tuple },
@@ -2269,6 +2337,7 @@ pub fn StdCodec(comptime V: type) type {
 
             var any_decode_init: bool = false;
             var any_free: bool = false;
+            var max_encode_min_size: usize = 0;
 
             var enc_field_kind_max: FieldGroupKind = .all_void;
             var encode_fields: [fields.len]std.builtin.Type.StructField = undefined;
@@ -2278,29 +2347,30 @@ pub fn StdCodec(comptime V: type) type {
 
             @setEvalBranchQuota(fields.len * 5 + 2);
             for (&encode_fields, &decode_fields, fields) |*encode_field, *decode_field, field| {
-                const std_field: StdCodec(field.type) = @field(field_codecs, field.name);
+                const std_field_codec: bk.Codec(field.type) = @field(field_codecs, field.name).codec;
 
-                any_decode_init = any_decode_init or std_field.codec.decodeInitFn != null;
-                any_free = any_free or std_field.codec.freeFn != null;
+                any_decode_init = any_decode_init or std_field_codec.decodeInitFn != null;
+                any_free = any_free or std_field_codec.freeFn != null;
+                max_encode_min_size = @max(max_encode_min_size, std_field_codec.encode_min_size);
 
-                const enc_field_kind: FieldGroupKind = .fromType(std_field.codec.EncodeCtx);
+                const enc_field_kind: FieldGroupKind = .fromType(std_field_codec.EncodeCtx);
                 enc_field_kind_max = .max(enc_field_kind_max, enc_field_kind);
                 encode_field.* = .{
                     .name = field.name,
-                    .type = std_field.codec.EncodeCtx,
+                    .type = std_field_codec.EncodeCtx,
                     .default_value_ptr = if (enc_field_kind == .all_void) @ptrCast(&{}) else null,
                     .is_comptime = enc_field_kind == .all_void,
-                    .alignment = @alignOf(std_field.codec.EncodeCtx),
+                    .alignment = @alignOf(std_field_codec.EncodeCtx),
                 };
 
-                const dec_field_kind: FieldGroupKind = .fromType(std_field.codec.DecodeCtx);
+                const dec_field_kind: FieldGroupKind = .fromType(std_field_codec.DecodeCtx);
                 dec_field_kind_max = .max(dec_field_kind_max, dec_field_kind);
                 decode_field.* = .{
                     .name = field.name,
-                    .type = std_field.codec.DecodeCtx,
+                    .type = std_field_codec.DecodeCtx,
                     .default_value_ptr = if (dec_field_kind == .all_void) @ptrCast(&{}) else null,
                     .is_comptime = dec_field_kind == .all_void,
-                    .alignment = @alignOf(std_field.codec.DecodeCtx),
+                    .alignment = @alignOf(std_field_codec.DecodeCtx),
                 };
             }
 
@@ -2332,6 +2402,7 @@ pub fn StdCodec(comptime V: type) type {
                 },
                 if (any_decode_init) .need_decode_init else .no_decode_init,
                 if (any_free) .need_free else .no_free,
+                max_encode_min_size,
             };
         }
     };
