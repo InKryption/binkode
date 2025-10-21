@@ -32,11 +32,11 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 ctx: void,
-            ) bk.EncodeToWriterError!void {
+            ) bk.EncodeToWriterError!usize {
                 _ = writer;
                 _ = config;
-                _ = values;
                 _ = ctx;
+                return values.len;
             }
 
             pub const decodeInit = null;
@@ -80,8 +80,9 @@ pub fn StdCodec(comptime V: type) type {
                 _: bk.Config,
                 values: []const u8,
                 _: void,
-            ) bk.EncodeToWriterError!void {
+            ) bk.EncodeToWriterError!usize {
                 try writer.writeAll(values);
+                return values.len;
             }
 
             pub const decodeInit = null;
@@ -130,9 +131,10 @@ pub fn StdCodec(comptime V: type) type {
                 _: bk.Config,
                 values: []const bool,
                 _: void,
-            ) bk.EncodeToWriterError!void {
+            ) bk.EncodeToWriterError!usize {
                 comptime if (@sizeOf(bool) != @sizeOf(u8)) unreachable;
                 try writer.writeAll(@ptrCast(values));
+                return values.len;
             }
 
             pub const decodeInit = null;
@@ -216,11 +218,11 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeToWriterError!void {
-                switch (config.int) {
-                    .fixint => try fixint.codec.encodeMany(writer, config, values, {}),
-                    .varint => try varint.codec.encodeMany(writer, config, values, {}),
-                }
+            ) bk.EncodeToWriterError!usize {
+                return switch (config.int) {
+                    .fixint => try fixint.codec.encodeManyPartialRaw(writer, config, values, {}),
+                    .varint => try varint.codec.encodeManyPartialRaw(writer, config, values, {}),
+                };
             }
 
             pub const decodeInit = null;
@@ -297,8 +299,9 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeToWriterError!void {
+            ) bk.EncodeToWriterError!usize {
                 try writer.writeSliceEndian(V, values, config.endian);
+                return values.len;
             }
 
             pub const decodeInit = null;
@@ -386,7 +389,7 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeToWriterError!void {
+            ) bk.EncodeToWriterError!usize {
                 for (values) |value| {
                     const unsigned_int = switch (signedness) {
                         .signed => bk.varint.zigzag.signedToUnsigned(Int, value),
@@ -396,6 +399,7 @@ pub fn StdCodec(comptime V: type) type {
                     const int_kind = bk.varint.encode(unsigned_int, &buffer, config.endian);
                     try writer.writeAll(buffer[0..int_kind.fullEncodedLen()]);
                 }
+                return values.len;
             }
 
             pub const decodeInit = null;
@@ -487,8 +491,9 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeToWriterError!void {
+            ) bk.EncodeToWriterError!usize {
                 try writer.writeSliceEndian(AsInt, @ptrCast(values), config.endian);
+                return values.len;
             }
 
             pub const decodeInit = null;
@@ -537,11 +542,12 @@ pub fn StdCodec(comptime V: type) type {
                 _: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeToWriterError!void {
+            ) bk.EncodeToWriterError!usize {
                 switch (V) {
                     u1, u2, u3, u4, u5, u6, u7 => |ByteSized| {
                         comptime if (@sizeOf(ByteSized) != @sizeOf(u8)) unreachable;
                         try writer.writeAll(@ptrCast(values));
+                        return values.len;
                     },
                     u8, u16, u21, u32 => {
                         const start_index = if (V != u8) 0 else blk: {
@@ -563,6 +569,7 @@ pub fn StdCodec(comptime V: type) type {
                             std.debug.assert(cp_len == actual_cp_len);
                             try writer.writeAll(encoded);
                         }
+                        return values.len;
                     },
                     else => comptime unreachable,
                 }
@@ -685,15 +692,16 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!void {
-                    for (values) |*value| {
-                        boolean.codec.encode(writer, config, &(value.* != null), ctx) catch |err| switch (err) {
-                            error.WriteFailed => |e| return e,
-                            error.EncodeFailed => unreachable, // bool never fails to encode
-                        };
-                        const payload_ptr = if (value.*) |*unwrapped| unwrapped else continue;
+                ) bk.EncodeToWriterError!usize {
+                    const value = &values[0];
+                    boolean.codec.encode(writer, config, &(value.* != null), ctx) catch |err| switch (err) {
+                        error.WriteFailed => |e| return e,
+                        error.EncodeFailed => unreachable, // bool never fails to encode
+                    };
+                    if (value.*) |*payload_ptr| {
                         try payload.encode(writer, config, payload_ptr, {});
                     }
+                    return 1;
                 }
 
                 pub fn decodeInit(
@@ -846,15 +854,15 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!void {
-                    for (values) |*value| {
-                        inline for (s_fields) |s_field| {
-                            const field: StdCodec(s_field.type) = @field(field_codecs, s_field.name);
-                            const field_ctx = getFieldCtx(ctx, s_field.name, field.codec.EncodeCtx);
-                            const field_ptr = &@field(value, s_field.name);
-                            try field.codec.encode(writer, config, field_ptr, field_ctx);
-                        }
+                ) bk.EncodeToWriterError!usize {
+                    const value = &values[0];
+                    inline for (s_fields) |s_field| {
+                        const field: StdCodec(s_field.type) = @field(field_codecs, s_field.name);
+                        const field_ctx = getFieldCtx(ctx, s_field.name, field.codec.EncodeCtx);
+                        const field_ptr = &@field(value, s_field.name);
+                        try field.codec.encode(writer, config, field_ptr, field_ctx);
                     }
+                    return 1;
                 }
 
                 pub fn decodeInit(
@@ -1053,27 +1061,27 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     maybe_ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!void {
-                    for (values) |*value| {
-                        const current_tag: union_info.tag_type.? = value.*;
-                        try std_tag.codec.encode(writer, config, &current_tag, {});
-                        switch (value.*) {
-                            inline else => |*payload_ptr, itag| {
-                                const Payload = @TypeOf(payload_ptr.*);
-                                const payload_codec: StdCodec(Payload) = @field(payload_codecs, @tagName(itag));
-                                const payload_ctx: payload_codec.codec.EncodeCtx = ctx: {
-                                    const ctx = switch (@typeInfo(payload_codec.codec.EncodeCtx)) {
-                                        .void => break :ctx {},
-                                        .optional => maybe_ctx orelse break :ctx null,
-                                        else => maybe_ctx,
-                                    };
-                                    break :ctx @field(ctx, @tagName(itag));
+                ) bk.EncodeToWriterError!usize {
+                    const value = &values[0];
+                    const current_tag: union_info.tag_type.? = value.*;
+                    try std_tag.codec.encode(writer, config, &current_tag, {});
+                    switch (value.*) {
+                        inline else => |*payload_ptr, itag| {
+                            const Payload = @TypeOf(payload_ptr.*);
+                            const payload_codec: StdCodec(Payload) = @field(payload_codecs, @tagName(itag));
+                            const payload_ctx: payload_codec.codec.EncodeCtx = ctx: {
+                                const ctx = switch (@typeInfo(payload_codec.codec.EncodeCtx)) {
+                                    .void => break :ctx {},
+                                    .optional => maybe_ctx orelse break :ctx null,
+                                    else => maybe_ctx,
                                 };
+                                break :ctx @field(ctx, @tagName(itag));
+                            };
 
-                                try payload_codec.codec.encode(writer, config, payload_ptr, payload_ctx);
-                            },
-                        }
+                            try payload_codec.codec.encode(writer, config, payload_ptr, payload_ctx);
+                        },
                     }
+                    return 1;
                 }
 
                 pub fn decodeInit(
@@ -1282,14 +1290,13 @@ pub fn StdCodec(comptime V: type) type {
                 config: bk.Config,
                 values: []const V,
                 _: void,
-            ) bk.EncodeToWriterError!void {
+            ) bk.EncodeToWriterError!usize {
                 if (@sizeOf(enum_info.tag_type) == @sizeOf(u32)) {
-                    try u32_codec.encodeMany(writer, config, @ptrCast(values), {});
+                    return try u32_codec.encodeManyPartialRaw(writer, config, @ptrCast(values), {});
                 } else {
-                    for (values) |value| {
-                        const as_u32: u32 = @intFromEnum(value);
-                        return u32_codec.encode(writer, config, &as_u32, {});
-                    }
+                    const as_u32: u32 = @intFromEnum(values[0]);
+                    try u32_codec.encode(writer, config, &as_u32, {});
+                    return 1;
                 }
             }
 
@@ -1384,8 +1391,9 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!void {
-                    try element.codec.encodeMany(writer, config, @ptrCast(values), ctx);
+                ) bk.EncodeToWriterError!usize {
+                    try element.codec.encodeMany(writer, config, &values[0], ctx);
+                    return 1;
                 }
 
                 pub fn decodeInit(
@@ -1488,10 +1496,9 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!void {
-                    for (values) |value| {
-                        try child.codec.encode(writer, config, value, ctx);
-                    }
+                ) bk.EncodeToWriterError!usize {
+                    try child.codec.encode(writer, config, values[0], ctx);
+                    return 1;
                 }
 
                 pub const decodeInit = null;
@@ -1568,11 +1575,11 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!void {
-                    for (values) |value| {
-                        try length.codec.encode(writer, config, &value.len, {});
-                        try element.codec.encodeMany(writer, config, value, ctx);
-                    }
+                ) bk.EncodeToWriterError!usize {
+                    const value = values[0];
+                    try length.codec.encode(writer, config, &value.len, {});
+                    try element.codec.encodeMany(writer, config, value, ctx);
+                    return 1;
                 }
 
                 pub fn decodeInit(
@@ -1720,11 +1727,11 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const V,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!void {
-                    for (values) |value| {
-                        try length.codec.encode(writer, config, &value.len, ctx);
-                        try std_array.codec.encode(writer, config, value, ctx);
-                    }
+                ) bk.EncodeToWriterError!usize {
+                    const value = values[0];
+                    try length.codec.encode(writer, config, &value.len, ctx);
+                    try std_array.codec.encode(writer, config, value, ctx);
+                    return 1;
                 }
 
                 pub const decodeInit = null;
@@ -1838,11 +1845,11 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const ArrayList,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!void {
+                ) bk.EncodeToWriterError!usize {
                     const slice_codec: bk.Codec(ArrayList.Slice) = .standard(.slice(element));
-                    for (values) |value| {
-                        try slice_codec.encode(writer, config, &value.items, ctx);
-                    }
+                    const value = &values[0];
+                    try slice_codec.encode(writer, config, &value.items, ctx);
+                    return 1;
                 }
 
                 pub fn decodeInit(
@@ -2011,16 +2018,16 @@ pub fn StdCodec(comptime V: type) type {
                     config: bk.Config,
                     values: []const Map,
                     maybe_ctx: EncodeCtxParam,
-                ) bk.EncodeToWriterError!void {
+                ) bk.EncodeToWriterError!usize {
                     const key_ctx, const val_ctx = unwrapKeyValCtxs(.encode, maybe_ctx);
 
-                    for (values) |value| {
-                        try length.codec.encode(writer, config, &value.count(), {});
-                        for (value.keys(), value.values()) |*k, *v| {
-                            try std_key.codec.encode(writer, config, k, key_ctx);
-                            try std_val.codec.encode(writer, config, v, val_ctx);
-                        }
+                    const value = &values[0];
+                    try length.codec.encode(writer, config, &value.count(), {});
+                    for (value.keys(), value.values()) |*k, *v| {
+                        try std_key.codec.encode(writer, config, k, key_ctx);
+                        try std_val.codec.encode(writer, config, v, val_ctx);
                     }
+                    return 1;
                 }
 
                 pub fn decodeInit(
