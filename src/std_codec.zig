@@ -31,15 +31,24 @@ pub fn StdCodec(comptime V: type) type {
                 writer: *std.Io.Writer,
                 config: bk.Config,
                 values: []const V,
+                progress_stack: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 ctx: void,
-            ) bk.EncodeToWriterError!usize {
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
+                _ = progress_stack;
+                _ = limit;
                 _ = writer;
                 _ = config;
                 _ = ctx;
-                return values.len;
+                return .{
+                    .value_count = values.len,
+                    .byte_count = 0,
+                };
             }
 
             pub const encode_min_size: usize = 0;
+
+            pub const encode_stack_size: usize = 0;
 
             pub const decodeInit = null;
 
@@ -81,13 +90,21 @@ pub fn StdCodec(comptime V: type) type {
                 writer: *std.Io.Writer,
                 _: bk.Config,
                 values: []const u8,
+                _: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 _: void,
-            ) bk.EncodeToWriterError!usize {
-                try writer.writeAll(values);
-                return values.len;
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
+                const bytes_to_write = limit.sliceConst(values);
+                try writer.writeAll(bytes_to_write);
+                return .{
+                    .value_count = bytes_to_write.len,
+                    .byte_count = bytes_to_write.len,
+                };
             }
 
             pub const encode_min_size: usize = 1;
+
+            pub const encode_stack_size: usize = 0;
 
             pub const decodeInit = null;
 
@@ -132,16 +149,26 @@ pub fn StdCodec(comptime V: type) type {
         pub const boolean: StdCodec(bool) = .from(.implement(void, ?*BoolDecodeDiag, struct {
             pub fn encode(
                 writer: *std.Io.Writer,
-                _: bk.Config,
+                config: bk.Config,
                 values: []const bool,
+                progress_stack: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 _: void,
-            ) bk.EncodeToWriterError!usize {
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
                 comptime if (@sizeOf(bool) != @sizeOf(u8)) unreachable;
-                try writer.writeAll(@ptrCast(values));
-                return values.len;
+                return try byte.codec.encodeManyPartialRaw(
+                    writer,
+                    config,
+                    @ptrCast(values),
+                    progress_stack,
+                    limit,
+                    {},
+                );
             }
 
-            pub const encode_min_size: usize = 1;
+            pub const encode_min_size: usize = byte.codec.encode_min_size;
+
+            pub const encode_stack_size: usize = 0;
 
             pub const decodeInit = null;
 
@@ -223,17 +250,29 @@ pub fn StdCodec(comptime V: type) type {
                 writer: *std.Io.Writer,
                 config: bk.Config,
                 values: []const V,
+                _: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 _: void,
-            ) bk.EncodeToWriterError!usize {
-                return switch (config.int) {
-                    .fixint => try fixint.codec.encodeManyPartialRaw(writer, config, values, {}),
-                    .varint => try varint.codec.encodeManyPartialRaw(writer, config, values, {}),
-                };
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
+                switch (config.int) {
+                    inline .fixint, .varint => |mode| {
+                        const int_codec: bk.Codec(V) = switch (mode) {
+                            .fixint => fixint.codec,
+                            .varint => varint.codec,
+                        };
+                        return try int_codec.encodeManyPartialRaw(writer, config, values, null, limit, {});
+                    },
+                }
             }
 
             pub const encode_min_size: usize = @max(
                 fixint.codec.encode_min_size,
                 varint.codec.encode_min_size,
+            );
+
+            pub const encode_stack_size: usize = @max(
+                fixint.codec.encode_stack_size,
+                varint.codec.encode_stack_size,
             );
 
             pub const decodeInit = null;
@@ -309,13 +348,44 @@ pub fn StdCodec(comptime V: type) type {
                 writer: *std.Io.Writer,
                 config: bk.Config,
                 values: []const V,
+                _: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 _: void,
-            ) bk.EncodeToWriterError!usize {
-                try writer.writeSliceEndian(V, values, config.endian);
-                return values.len;
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
+                if (Int != V) {
+                    const int_endian: Int = std.mem.nativeTo(Int, values[0], config.endian);
+                    const as_bytes: []const u8 = @ptrCast(&int_endian);
+                    if (limit.toInt()) |byte_limit| {
+                        std.debug.assert(byte_limit >= as_bytes.len);
+                    }
+                    try writer.writeAll(as_bytes);
+                    return .{
+                        .value_count = 1,
+                        .byte_count = as_bytes.len,
+                    };
+                } else {
+                    const values_end: usize, const bytes_end: usize = blk: {
+                        const values_byte_count = values.len * @sizeOf(Int);
+                        const byte_limit = limit.toInt() orelse
+                            break :blk .{ values.len, values_byte_count };
+                        if (byte_limit >= values_byte_count) {
+                            break :blk .{ values.len, values_byte_count };
+                        }
+                        const byte_limit_aligned = std.mem.alignBackward(usize, byte_limit, @sizeOf(Int));
+                        break :blk .{ @divExact(byte_limit_aligned, @sizeOf(Int)), byte_limit_aligned };
+                    };
+
+                    try writer.writeSliceEndian(Int, values[0..values_end], config.endian);
+                    return .{
+                        .value_count = values_end,
+                        .byte_count = bytes_end,
+                    };
+                }
             }
 
             pub const encode_min_size: usize = @sizeOf(Int);
+
+            pub const encode_stack_size: usize = 0;
 
             pub const decodeInit = null;
 
@@ -401,18 +471,36 @@ pub fn StdCodec(comptime V: type) type {
                 writer: *std.Io.Writer,
                 config: bk.Config,
                 values: []const V,
+                _: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 _: void,
-            ) bk.EncodeToWriterError!usize {
-                for (values) |value| {
-                    const unsigned_int = switch (signedness) {
-                        .signed => bk.varint.zigzag.signedToUnsigned(Int, value),
-                        .unsigned => value,
-                    };
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
+                if (limit.toInt()) |byte_limit| {
+                    const unsigned_int = bk.varint.zigzag.anyToUnsigned(Int, values[0]);
                     var buffer: [bk.varint.IntKind.fullEncodedLen(.maximum)]u8 = undefined;
                     const int_kind = bk.varint.encode(unsigned_int, &buffer, config.endian);
-                    try writer.writeAll(buffer[0..int_kind.fullEncodedLen()]);
+                    const encoded_len = int_kind.fullEncodedLen();
+                    std.debug.assert(byte_limit >= encoded_len);
+                    try writer.writeAll(buffer[0..encoded_len]);
+                    return .{
+                        .value_count = 1,
+                        .byte_count = encoded_len,
+                    };
+                } else {
+                    var byte_count: usize = 0;
+                    for (values) |value| {
+                        const unsigned_int = bk.varint.zigzag.anyToUnsigned(Int, value);
+                        var buffer: [bk.varint.IntKind.fullEncodedLen(.maximum)]u8 = undefined;
+                        const int_kind = bk.varint.encode(unsigned_int, &buffer, config.endian);
+                        const encoded_len = int_kind.fullEncodedLen();
+                        try writer.writeAll(buffer[0..encoded_len]);
+                        byte_count += encoded_len;
+                    }
+                    return .{
+                        .value_count = values.len,
+                        .byte_count = byte_count,
+                    };
                 }
-                return values.len;
             }
 
             pub const encode_min_size: usize = @max(
@@ -420,6 +508,8 @@ pub fn StdCodec(comptime V: type) type {
                 bk.varint.IntKind.fullEncodedLen(.fromValue(bk.varint.zigzag.anyToUnsigned(V, std.math.maxInt(V)))),
                 bk.varint.IntKind.fullEncodedLen(.fromValue(bk.varint.zigzag.anyToUnsigned(V, std.math.minInt(V)))),
             );
+
+            pub const encode_stack_size: usize = 0;
 
             pub const decodeInit = null;
 
@@ -498,6 +588,7 @@ pub fn StdCodec(comptime V: type) type {
         /// Decode's initial state is write-only.
         pub const float: StdCodecSelf = .from(.implement(void, void, struct {
             const AsInt = std.meta.Int(.unsigned, @bitSizeOf(V));
+            const as_int_codec: bk.Codec(AsInt) = .standard(.fixint);
             comptime {
                 switch (V) {
                     f32, f64 => {},
@@ -509,13 +600,23 @@ pub fn StdCodec(comptime V: type) type {
                 writer: *std.Io.Writer,
                 config: bk.Config,
                 values: []const V,
+                progress_stack: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 _: void,
-            ) bk.EncodeToWriterError!usize {
-                try writer.writeSliceEndian(AsInt, @ptrCast(values), config.endian);
-                return values.len;
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
+                return try as_int_codec.encodeManyPartialRaw(
+                    writer,
+                    config,
+                    @ptrCast(values),
+                    progress_stack,
+                    limit,
+                    {},
+                );
             }
 
             pub const encode_min_size: usize = @sizeOf(V);
+
+            pub const encode_stack_size: usize = 0;
 
             pub const decodeInit = null;
 
@@ -558,45 +659,69 @@ pub fn StdCodec(comptime V: type) type {
                 }
             }
 
+            fn codepointToBytes(buf: *[4]u8, value: V) ![]u8 {
+                if (value > std.math.maxInt(u21)) {
+                    return error.EncodeFailed;
+                }
+                const cp_val: u21 = @intCast(value);
+                const cp_len = std.unicode.utf8CodepointSequenceLength(cp_val) catch
+                    return error.EncodeFailed;
+                const encoded = buf[0..cp_len];
+                const actual_cp_len = std.unicode.utf8Encode(cp_val, encoded) catch
+                    return error.EncodeFailed;
+                std.debug.assert(cp_len == actual_cp_len);
+                return encoded;
+            }
+
             pub fn encode(
                 writer: *std.Io.Writer,
-                _: bk.Config,
+                config: bk.Config,
                 values: []const V,
+                _: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 _: void,
-            ) bk.EncodeToWriterError!usize {
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
                 switch (V) {
                     u1, u2, u3, u4, u5, u6, u7 => |ByteSized| {
                         comptime if (@sizeOf(ByteSized) != @sizeOf(u8)) unreachable;
-                        try writer.writeAll(@ptrCast(values));
-                        return values.len;
+                        return byte.codec.encodeManyPartialRaw(writer, config, @ptrCast(values), null, limit, {});
                     },
                     u8, u16, u21, u32 => {
-                        const start_index = if (V != u8) 0 else blk: {
-                            const first_non_ascii_index = indexOfScalarCmpPos(V, values, 0, .gt, 127) orelse values.len;
-                            try writer.writeAll(values[0..first_non_ascii_index]);
-                            break :blk first_non_ascii_index;
-                        };
-                        for (values[start_index..]) |value| {
-                            if (value > std.math.maxInt(u21)) {
-                                return error.EncodeFailed;
-                            }
-                            const cp_val: u21 = @intCast(value);
-                            const cp_len = std.unicode.utf8CodepointSequenceLength(cp_val) catch
-                                return error.EncodeFailed;
-                            var encoded_buffer: [4]u8 = undefined;
-                            const encoded = encoded_buffer[0..cp_len];
-                            const actual_cp_len = std.unicode.utf8Encode(cp_val, encoded) catch
-                                return error.EncodeFailed;
-                            std.debug.assert(cp_len == actual_cp_len);
+                        if (limit.toInt()) |byte_limit| {
+                            var encoded_buf: [4]u8 = undefined;
+                            const encoded = try codepointToBytes(&encoded_buf, values[0]);
+                            std.debug.assert(byte_limit >= encoded.len);
                             try writer.writeAll(encoded);
+                            return .{
+                                .value_count = 1,
+                                .byte_count = encoded.len,
+                            };
+                        } else {
+                            var byte_count: usize = 0;
+                            const start_index = if (V != u8) 0 else blk: {
+                                const first_non_ascii_index = indexOfScalarCmpPos(V, values, 0, .gt, 127) orelse values.len;
+                                try writer.writeAll(values[0..first_non_ascii_index]);
+                                break :blk first_non_ascii_index;
+                            };
+                            for (values[start_index..]) |value| {
+                                var encoded_buf: [4]u8 = undefined;
+                                const encoded = try codepointToBytes(&encoded_buf, value);
+                                try writer.writeAll(encoded);
+                                byte_count += encoded.len;
+                            }
+                            return .{
+                                .value_count = values.len,
+                                .byte_count = byte_count,
+                            };
                         }
-                        return values.len;
                     },
                     else => comptime unreachable,
                 }
             }
 
             pub const encode_min_size: usize = 4;
+
+            pub const encode_stack_size: usize = 0;
 
             pub const decodeInit = null;
 
@@ -714,23 +839,76 @@ pub fn StdCodec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!usize {
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    var bool_flag_dummy: u64 = 0;
+                    const bool_flag: *u64, //
+                    const payload_stack: ?*[encode_stack_size - 1]u64 //
+                    = if (progress_stack) |ps| .{ &ps[0], ps[1..] } else .{ &bool_flag_dummy, null };
+
                     const value = &values[0];
-                    boolean.codec.encode(writer, config, &(value.* != null), ctx) catch |err| switch (err) {
-                        error.WriteFailed => |e| return e,
-                        error.EncodeFailed => unreachable, // bool never fails to encode
+
+                    var byte_count: usize = 0;
+                    if (bool_flag.* == 0) {
+                        bool_flag.* = 1;
+
+                        const not_null = value.* != null;
+                        const bool_counts = boolean.codec.encodeOnePartialRaw(
+                            writer,
+                            config,
+                            &not_null,
+                            null,
+                            limit,
+                            ctx,
+                        ) catch |err| switch (err) {
+                            error.WriteFailed => |e| return e,
+                            error.EncodeFailed => unreachable, // bool never fails to encode
+                        };
+                        std.debug.assert(bool_counts.value_count == 1);
+                        std.debug.assert(bool_counts.byte_count == 1);
+                        byte_count += 1;
+                    } else std.debug.assert(bool_flag.* == 1);
+
+                    const remaining_limit = limit.subtract(byte_count).?;
+
+                    const done: bool = if (value.*) |*payload_ptr| blk: {
+                        if (remaining_limit.toInt()) |byte_limit| {
+                            if (byte_limit < payload.encode_min_size) break :blk false;
+                        }
+
+                        const payload_counts = try payload.encodeOnePartialRaw(
+                            writer,
+                            config,
+                            payload_ptr,
+                            payload_stack,
+                            remaining_limit,
+                            {},
+                        );
+                        byte_count += payload_counts.byte_count;
+                        break :blk switch (payload_counts.value_count) {
+                            0 => false,
+                            1 => true,
+                            else => unreachable,
+                        };
+                    } else true;
+                    if (done) bool_flag.* = 0; // reset
+
+                    return .{
+                        .value_count = if (done) 1 else 0,
+                        .byte_count = byte_count,
                     };
-                    if (value.*) |*payload_ptr| {
-                        try payload.encode(writer, config, payload_ptr, {});
-                    }
-                    return 1;
                 }
 
                 pub const encode_min_size: usize = @max(
                     boolean.codec.encode_min_size,
                     payload.encode_min_size,
                 );
+
+                pub const encode_stack_size: usize =
+                    1 + // used as a boolean value which is 0 or 1 to track whether the null bool was written
+                    payload.encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -839,6 +1017,7 @@ pub fn StdCodec(comptime V: type) type {
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
                 .encode_min_size = erased.encode_min_size,
+                .encode_stack_size = erased.encode_stack_size,
 
                 .DecodeCtx = DecodeCtxParam,
                 .decodeInitFn = if (decode_init_defined) erased.decodeInit else null,
@@ -872,7 +1051,8 @@ pub fn StdCodec(comptime V: type) type {
             const DecodeCtx, //
             const decode_init_req, //
             const free_req, //
-            const max_encode_min_size //
+            const max_encode_min_size, //
+            const max_encode_stack_size //
             = FieldContexts(field_codecs);
 
             const any_decode_init = decode_init_req == .need_decode_init;
@@ -883,19 +1063,62 @@ pub fn StdCodec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!usize {
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    var field_index_dummy: u64 = 0;
+                    const field_index: *u64, //
+                    const field_stack: ?*[encode_stack_size - 1]u64 //
+                    = if (progress_stack) |ps| .{ &ps[0], ps[1..] } else .{ &field_index_dummy, null };
+                    std.debug.assert(field_index.* <= s_fields.len);
+
                     const value = &values[0];
-                    inline for (s_fields) |s_field| {
+
+                    var byte_count: usize = 0;
+                    inline for (s_fields, 0..) |s_field, i| if (field_index.* == i) {
                         const field: StdCodec(s_field.type) = @field(field_codecs, s_field.name);
                         const field_ctx = getFieldCtx(ctx, s_field.name, field.codec.EncodeCtx);
                         const field_ptr = &@field(value, s_field.name);
-                        try field.codec.encode(writer, config, field_ptr, field_ctx);
-                    }
-                    return 1;
+
+                        const remaining_limit = limit.subtract(byte_count).?;
+                        if (remaining_limit.toInt()) |byte_limit| {
+                            if (byte_limit < field.codec.encode_min_size) return .{
+                                .value_count = 0,
+                                .byte_count = byte_count,
+                            };
+                        }
+
+                        const field_counts = try field.codec.encodeOnePartialRaw(
+                            writer,
+                            config,
+                            field_ptr,
+                            if (field_stack) |fs| fs[0..field.codec.encode_stack_size] else null,
+                            remaining_limit,
+                            field_ctx,
+                        );
+                        byte_count += field_counts.byte_count;
+                        switch (field_counts.value_count) {
+                            0 => return .{
+                                .value_count = 0,
+                                .byte_count = byte_count,
+                            },
+                            1 => field_index.* += 1,
+                            else => unreachable,
+                        }
+                    };
+                    field_index.* = 0; // reset
+                    return .{
+                        .value_count = 1,
+                        .byte_count = byte_count,
+                    };
                 }
 
                 pub const encode_min_size: usize = max_encode_min_size;
+
+                pub const encode_stack_size: usize =
+                    1 + // current field index
+                    max_encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -1020,6 +1243,7 @@ pub fn StdCodec(comptime V: type) type {
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
                 .encode_min_size = erased.encode_min_size,
+                .encode_stack_size = erased.encode_stack_size,
 
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = if (any_decode_init) erased.decodeInit else null,
@@ -1074,7 +1298,8 @@ pub fn StdCodec(comptime V: type) type {
             const PayloadDecodeCtx, //
             _, //
             const free_req, //
-            const max_encode_min_size //
+            const max_encode_min_size, //
+            const max_encode_stack_size //
             = FieldContexts(payload_codecs);
             const DecodeCtx = TaggedUnionDecodeCtxGeneric(PayloadDecodeCtx);
 
@@ -1094,17 +1319,45 @@ pub fn StdCodec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     maybe_ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!usize {
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    var tag_flag_dummy: u64 = 0;
+                    const tag_flag: *u64, //
+                    const payload_stack: ?*[encode_stack_size - 1]u64 //
+                    = if (progress_stack) |ps| .{ &ps[0], ps[1..] } else .{ &tag_flag_dummy, null };
+
                     const value = &values[0];
-                    const current_tag: union_info.tag_type.? = value.*;
-                    try tag_codec.encode(writer, config, &current_tag, {});
-                    switch (value.*) {
-                        inline else => |*payload_ptr, itag| {
+
+                    var byte_count: usize = 0;
+                    if (tag_flag.* == 0) {
+                        tag_flag.* = 1;
+
+                        const current_tag: union_info.tag_type.? = value.*;
+                        const tag_counts = tag_codec.encodeOnePartialRaw(
+                            writer,
+                            config,
+                            &current_tag,
+                            null,
+                            limit,
+                            {},
+                        ) catch |err| switch (err) {
+                            error.WriteFailed => |e| return e,
+                            error.EncodeFailed => unreachable, // tag never fails to encode
+                        };
+                        std.debug.assert(tag_counts.value_count == 1);
+                        byte_count += tag_counts.byte_count;
+                    } else std.debug.assert(tag_flag.* == 1);
+
+                    const remaining_limit = limit.subtract(byte_count).?;
+
+                    const payload_counts: bk.EncodedCounts = switch (value.*) {
+                        inline else => |*payload_ptr, itag| pl_counts: {
                             const Payload = @TypeOf(payload_ptr.*);
-                            const payload_codec: StdCodec(Payload) = @field(payload_codecs, @tagName(itag));
-                            const payload_ctx: payload_codec.codec.EncodeCtx = ctx: {
-                                const ctx = switch (@typeInfo(payload_codec.codec.EncodeCtx)) {
+                            const payload_codec: bk.Codec(Payload) = @field(payload_codecs, @tagName(itag)).codec;
+                            const payload_ctx: payload_codec.EncodeCtx = ctx: {
+                                const ctx = switch (@typeInfo(payload_codec.EncodeCtx)) {
                                     .void => break :ctx {},
                                     .optional => maybe_ctx orelse break :ctx null,
                                     else => maybe_ctx,
@@ -1112,16 +1365,48 @@ pub fn StdCodec(comptime V: type) type {
                                 break :ctx @field(ctx, @tagName(itag));
                             };
 
-                            try payload_codec.codec.encode(writer, config, payload_ptr, payload_ctx);
+                            if (remaining_limit.toInt()) |byte_limit| {
+                                if (byte_limit < payload_codec.encode_min_size) return .{
+                                    .value_count = 0,
+                                    .byte_count = byte_count,
+                                };
+                            }
+
+                            break :pl_counts try payload_codec.encodeOnePartialRaw(
+                                writer,
+                                config,
+                                payload_ptr,
+                                if (payload_stack) |ps| ps[0..payload_codec.encode_stack_size] else null,
+                                remaining_limit,
+                                payload_ctx,
+                            );
                         },
+                    };
+
+                    byte_count += payload_counts.byte_count;
+                    switch (payload_counts.value_count) {
+                        0 => return .{
+                            .value_count = 0,
+                            .byte_count = byte_count,
+                        },
+                        1 => tag_flag.* = 0, // reset
+                        else => unreachable,
                     }
-                    return 1;
+
+                    return .{
+                        .value_count = 1,
+                        .byte_count = byte_count,
+                    };
                 }
 
                 pub const encode_min_size: usize = @max(
                     tag_codec.encode_min_size,
                     max_encode_min_size,
                 );
+
+                pub const encode_stack_size: usize =
+                    1 + // used as a boolean value which is 0 or 1 to track whether the tag was written
+                    max_encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -1285,6 +1570,7 @@ pub fn StdCodec(comptime V: type) type {
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
                 .encode_min_size = erased.encode_min_size,
+                .encode_stack_size = erased.encode_stack_size,
 
                 .DecodeCtx = DecodeCtxParam,
                 .decodeInitFn = if (decode_init_tag_opt != null) erased.decodeInit else null,
@@ -1329,18 +1615,21 @@ pub fn StdCodec(comptime V: type) type {
                 writer: *std.Io.Writer,
                 config: bk.Config,
                 values: []const V,
+                progress_stack: ?*[encode_stack_size]u64,
+                limit: std.Io.Limit,
                 _: void,
-            ) bk.EncodeToWriterError!usize {
+            ) bk.EncodeToWriterError!bk.EncodedCounts {
                 if (@sizeOf(enum_info.tag_type) == @sizeOf(u32)) {
-                    return try u32_codec.encodeManyPartialRaw(writer, config, @ptrCast(values), {});
+                    return try u32_codec.encodeManyPartialRaw(writer, config, @ptrCast(values), progress_stack, limit, {});
                 } else {
                     const as_u32: u32 = @intFromEnum(values[0]);
-                    try u32_codec.encode(writer, config, &as_u32, {});
-                    return 1;
+                    return try u32_codec.encodeOnePartialRaw(writer, config, &as_u32, progress_stack, limit, {});
                 }
             }
 
             pub const encode_min_size: usize = u32_codec.encode_min_size;
+
+            pub const encode_stack_size: usize = 0;
 
             pub const decodeInit = null;
 
@@ -1432,13 +1721,39 @@ pub fn StdCodec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!usize {
-                    try element.codec.encodeMany(writer, config, &values[0], ctx);
-                    return 1;
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    var elem_index_dummy: u64 = 0;
+                    const elem_index: *u64, //
+                    const elem_stack: ?*[encode_stack_size - 1]u64 //
+                    = if (progress_stack) |ps| .{ &ps[0], ps[1..] } else .{ &elem_index_dummy, null };
+
+                    const flattened: []const Element = @ptrCast(values); // flatten `[][n]E` as `[]E`.
+
+                    const elems_counts = try element.codec.encodeManyPartialRaw(
+                        writer,
+                        config,
+                        flattened[elem_index.*..],
+                        elem_stack,
+                        limit,
+                        ctx,
+                    );
+                    const array_count = (elem_index.* + elems_counts.value_count) / array_len;
+                    elem_index.* = (elem_index.* + elems_counts.value_count) % array_len;
+
+                    return .{
+                        .value_count = array_count,
+                        .byte_count = elems_counts.byte_count,
+                    };
                 }
 
                 pub const encode_min_size: usize = element.codec.encode_min_size;
+
+                pub const encode_stack_size: usize =
+                    1 + // current element index
+                    element.codec.encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -1507,6 +1822,7 @@ pub fn StdCodec(comptime V: type) type {
                 .EncodeCtx = element.codec.EncodeCtx,
                 .encodeFn = erased.encode,
                 .encode_min_size = erased.encode_min_size,
+                .encode_stack_size = erased.encode_stack_size,
 
                 .DecodeCtx = element.codec.DecodeCtx,
                 .decodeInitFn = if (element.codec.decodeInitFn != null) erased.decodeInit else null,
@@ -1540,13 +1856,23 @@ pub fn StdCodec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!usize {
-                    try child.codec.encode(writer, config, values[0], ctx);
-                    return 1;
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    return try child.codec.encodeOnePartialRaw(
+                        writer,
+                        config,
+                        values[0],
+                        progress_stack,
+                        limit,
+                        ctx,
+                    );
                 }
 
                 pub const encode_min_size: usize = child.codec.encode_min_size;
+
+                pub const encode_stack_size: usize = child.codec.encode_stack_size;
 
                 pub const decodeInit = null;
 
@@ -1621,18 +1947,80 @@ pub fn StdCodec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!usize {
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    var len_flag_dummy: u64 = 0;
+                    var elem_index_dummy: u64 = 0;
+                    const len_flag: *u64, //
+                    const elem_index: *u64, //
+                    const elem_stack: ?*[encode_stack_size - 2]u64 //
+                    = if (progress_stack) |ps|
+                        .{ &ps[0], &ps[1], ps[2..] }
+                    else
+                        .{ &len_flag_dummy, &elem_index_dummy, null };
+
                     const value = values[0];
-                    try length.codec.encode(writer, config, &value.len, {});
-                    try element.codec.encodeMany(writer, config, value, ctx);
-                    return 1;
+
+                    var byte_count: usize = 0;
+                    if (len_flag.* == 0) {
+                        len_flag.* = 1;
+                        std.debug.assert(elem_index.* == 0);
+
+                        const len_counts = length.codec.encodeOnePartialRaw(
+                            writer,
+                            config,
+                            &value.len,
+                            null,
+                            limit,
+                            {},
+                        ) catch |err| switch (err) {
+                            error.WriteFailed => |e| return e,
+                            error.EncodeFailed => unreachable, // len never fails to encode
+                        };
+                        std.debug.assert(len_counts.value_count == 1);
+                        byte_count += len_counts.byte_count;
+                    } else std.debug.assert(len_flag.* == 1);
+
+                    const remaining_limit = limit.subtract(byte_count).?;
+
+                    if (remaining_limit.toInt()) |byte_limit| {
+                        if (byte_limit < element.codec.encode_min_size) return .{
+                            .value_count = 0,
+                            .byte_count = byte_count,
+                        };
+                    }
+
+                    const elems_counts = try element.codec.encodeManyPartialRaw(
+                        writer,
+                        config,
+                        value[elem_index.*..],
+                        elem_stack,
+                        remaining_limit,
+                        ctx,
+                    );
+                    byte_count += elems_counts.byte_count;
+                    elem_index.* += elems_counts.value_count;
+                    std.debug.assert(elem_index.* <= value.len);
+
+                    const done = elem_index.* == value.len;
+                    if (done) len_flag.*, elem_index.* = .{ 0, 0 }; // reset
+                    return .{
+                        .value_count = if (done) 1 else 0,
+                        .byte_count = byte_count,
+                    };
                 }
 
                 pub const encode_min_size: usize = @max(
                     length.codec.encode_min_size,
                     element.codec.encode_min_size,
                 );
+
+                pub const encode_stack_size: usize =
+                    1 + // used as a boolean value which is 0 or 1 to track whether the length was written
+                    1 + // current element index
+                    element.codec.encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -1750,6 +2138,7 @@ pub fn StdCodec(comptime V: type) type {
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
                 .encode_min_size = erased.encode_min_size,
+                .encode_stack_size = erased.encode_stack_size,
 
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = erased.decodeInit,
@@ -1772,25 +2161,34 @@ pub fn StdCodec(comptime V: type) type {
                         "array ptr codec is not implemented for type " ++ @typeName(V),
                     );
                 }
+                const AsSlice = @Type(.{ .pointer = info: {
+                    var info = ptr_info;
+                    info.size = .slice;
+                    info.child = Element;
+                    break :info info;
+                } });
 
+                const slice_codec: bk.Codec(AsSlice) = .standard(.slice(element));
                 const array_codec: bk.Codec(ptr_info.child) = .standard(.array(element));
 
                 pub fn encode(
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!usize {
-                    const value = values[0];
-                    try length.codec.encode(writer, config, &value.len, ctx);
-                    try array_codec.encode(writer, config, value, ctx);
-                    return 1;
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    const as_slice: AsSlice = values[0];
+                    return try slice_codec.encodeOnePartialRaw(writer, config, &as_slice, progress_stack, limit, ctx);
                 }
 
                 pub const encode_min_size: usize = @max(
                     length.codec.encode_min_size,
                     array_codec.encode_min_size,
                 );
+
+                pub const encode_stack_size: usize = slice_codec.encode_stack_size;
 
                 pub const decodeInit = null;
 
@@ -1904,14 +2302,23 @@ pub fn StdCodec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const ArrayList,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     ctx: EncodeCtx,
-                ) bk.EncodeToWriterError!usize {
-                    const value = &values[0];
-                    try slice_codec.encode(writer, config, &value.items, ctx);
-                    return 1;
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    return try slice_codec.encodeOnePartialRaw(
+                        writer,
+                        config,
+                        &values[0].items,
+                        progress_stack,
+                        limit,
+                        ctx,
+                    );
                 }
 
                 pub const encode_min_size: usize = slice_codec.encode_min_size;
+
+                pub const encode_stack_size: usize = slice_codec.encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -2007,8 +2414,8 @@ pub fn StdCodec(comptime V: type) type {
         }
 
         const maybe_ahm_info: ?bk.std_reflect.ArrayHashMapInfo = .from(V);
-        pub const ArrayHashMapKey = if (maybe_ahm_info) |hm_info| hm_info.K else noreturn;
-        pub const ArrayHashMapVal = if (maybe_ahm_info) |hm_info| hm_info.V else noreturn;
+        pub const ArrayHashMapKey = if (maybe_ahm_info) |hm_info| hm_info.K else @compileError(@typeName(V) ++ " is not a hash map");
+        pub const ArrayHashMapVal = if (maybe_ahm_info) |hm_info| hm_info.V else @compileError(@typeName(V) ++ " is not a hash map");
 
         pub fn ArrayHashMapCtxs(
             std_key: StdCodec(ArrayHashMapKey),
@@ -2071,24 +2478,102 @@ pub fn StdCodec(comptime V: type) type {
                 .all_void => void,
             };
 
-            const entry_codec: StdCodec(struct { hm_info.K, hm_info.V }) = .tuple(.{ std_key, std_val });
+            const EntryTuple = struct { *const hm_info.K, *const hm_info.V };
+            const entry_codec: bk.Codec(EntryTuple) = .standard(.tuple(.{
+                .singleItemPtr(std_key),
+                .singleItemPtr(std_val),
+            }));
 
             return .from(.implement(EncodeCtxParam, DecodeCtxParam, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
                     config: bk.Config,
                     values: []const Map,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     maybe_ctx: EncodeCtxParam,
-                ) bk.EncodeToWriterError!usize {
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    var len_flag_dummy: u64 = 0;
+                    var elem_index_dummy: u64 = 0;
+                    const len_flag: *u64, //
+                    const entry_index: *u64, //
+                    const entry_stack: ?*[encode_stack_size - 2]u64 //
+                    = if (progress_stack) |ps|
+                        .{ &ps[0], &ps[1], ps[2..] }
+                    else
+                        .{ &len_flag_dummy, &elem_index_dummy, null };
+
                     const key_ctx, const val_ctx = unwrapKeyValCtxs(.encode, maybe_ctx);
 
                     const value = &values[0];
-                    try length.codec.encode(writer, config, &value.count(), {});
-                    for (value.keys(), value.values()) |*k, *v| {
-                        try std_key.codec.encode(writer, config, k, key_ctx);
-                        try std_val.codec.encode(writer, config, v, val_ctx);
+
+                    var byte_count: usize = 0;
+                    if (len_flag.* == 0) {
+                        len_flag.* = 1;
+                        std.debug.assert(entry_index.* == 0);
+
+                        const len_counts = length.codec.encodeOnePartialRaw(
+                            writer,
+                            config,
+                            &value.count(),
+                            null,
+                            limit,
+                            {},
+                        ) catch |err| switch (err) {
+                            error.WriteFailed => |e| return e,
+                            error.EncodeFailed => unreachable, // len never fails to encode
+                        };
+                        std.debug.assert(len_counts.value_count == 1);
+                        byte_count += len_counts.byte_count;
+                    } else std.debug.assert(len_flag.* == 1);
+
+                    for (
+                        value.keys()[entry_index.*..],
+                        value.values()[entry_index.*..],
+                        entry_index.*..value.count(),
+                    ) |*k, *v, i| {
+                        const entry_tuple: EntryTuple = .{ k, v };
+
+                        const remaining_limit = limit.subtract(byte_count).?;
+                        if (remaining_limit.toInt()) |byte_limit| {
+                            if (byte_limit < entry_codec.encode_min_size) {
+                                entry_index.* = i;
+                                return .{
+                                    .value_count = 0,
+                                    .byte_count = byte_count,
+                                };
+                            }
+                        }
+
+                        const entry_counts = try entry_codec.encodeOnePartialRaw(
+                            writer,
+                            config,
+                            &entry_tuple,
+                            entry_stack,
+                            remaining_limit,
+                            if (EncodeCtxParam != void) .{ key_ctx, val_ctx },
+                        );
+                        byte_count += entry_counts.byte_count;
+                        switch (entry_counts.value_count) {
+                            0 => {
+                                entry_index.* = i;
+                                return .{
+                                    .value_count = 0,
+                                    .byte_count = byte_count,
+                                };
+                            },
+                            1 => {},
+                            else => unreachable,
+                        }
                     }
-                    return 1;
+
+                    len_flag.* = 0; // reset
+                    entry_index.* = 0; // reset
+
+                    return .{
+                        .value_count = 1,
+                        .byte_count = byte_count,
+                    };
                 }
 
                 pub const encode_min_size: usize = @max(
@@ -2096,6 +2581,11 @@ pub fn StdCodec(comptime V: type) type {
                     std_key.codec.encode_min_size,
                     std_val.codec.encode_min_size,
                 );
+
+                pub const encode_stack_size: usize =
+                    1 + // used as a boolean value which is 0 or 1 to track whether the length was written
+                    1 + // current entry index
+                    entry_codec.encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -2191,7 +2681,7 @@ pub fn StdCodec(comptime V: type) type {
                                 value.putAssumeCapacity(k, v);
                             };
                         } else {
-                            try entry_codec.codec.decodeSkip(reader, config, len, .{ key_ctx, val_ctx });
+                            try entry_codec.decodeSkip(reader, config, len, .{ key_ctx, val_ctx });
                         }
                     }
                 }
@@ -2328,6 +2818,7 @@ pub fn StdCodec(comptime V: type) type {
             enum { need_decode_init, no_decode_init },
             enum { need_free, no_free },
             usize, // max_encode_min_size
+            usize, // max_encode_stack_size
         } {
             const fields, const is_tuple = switch (@typeInfo(V)) {
                 .@"struct" => |s_info| .{ s_info.fields, s_info.is_tuple },
@@ -2338,6 +2829,7 @@ pub fn StdCodec(comptime V: type) type {
             var any_decode_init: bool = false;
             var any_free: bool = false;
             var max_encode_min_size: usize = 0;
+            var max_encode_stack_size: usize = 0;
 
             var enc_field_kind_max: FieldGroupKind = .all_void;
             var encode_fields: [fields.len]std.builtin.Type.StructField = undefined;
@@ -2352,6 +2844,7 @@ pub fn StdCodec(comptime V: type) type {
                 any_decode_init = any_decode_init or std_field_codec.decodeInitFn != null;
                 any_free = any_free or std_field_codec.freeFn != null;
                 max_encode_min_size = @max(max_encode_min_size, std_field_codec.encode_min_size);
+                max_encode_stack_size = @max(max_encode_stack_size, std_field_codec.encode_stack_size);
 
                 const enc_field_kind: FieldGroupKind = .fromType(std_field_codec.EncodeCtx);
                 enc_field_kind_max = .max(enc_field_kind_max, enc_field_kind);
@@ -2403,6 +2896,7 @@ pub fn StdCodec(comptime V: type) type {
                 if (any_decode_init) .need_decode_init else .no_decode_init,
                 if (any_free) .need_free else .no_free,
                 max_encode_min_size,
+                max_encode_stack_size,
             };
         }
     };
@@ -2758,11 +3252,11 @@ test "taggedUnion" {
     });
 }
 
-test "byte_array" {
+test "array value" {
     try testCodecRoundTrips([3]u8, .standard(.array(.byte)), {}, {}, &.{ "foo".*, "bar".*, "baz".* });
-}
 
-test "array" {
+    try testCodecRoundTrips([2]u64, .standard(.array(.int)), {}, null, &.{ .{ 0, 0 }, .{ 0, 1 } });
+
     try testCodecRoundTrips([2]u64, .standard(.array(.int)), {}, null, @ptrCast(&intTestEdgeCases(u64) ++ intTestEdgeCases(u64)));
     try testCodecRoundTrips([2]u64, .standard(.array(.int)), {}, null, &.{
         .{ 1, 2 },
@@ -2785,14 +3279,11 @@ test "singleItemPtr" {
     });
 }
 
-test "byte_slice" {
+test "slice value" {
     try testCodecRoundTrips([]const u8, .standard(.slice(.byte)), {}, {}, &.{
         &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }, "foo",  "bar",  "baz",
         &.{ 127, std.math.maxInt(u8) },  "fizz", "buzz", "fizzbuzz",
     });
-}
-
-test "slice" {
     try testCodecRoundTrips([]const u32, .standard(.slice(.int)), {}, null, &.{
         &.{ 0, 1, 2 },
         &.{ 3, 4, 5, 6 },
@@ -2803,7 +3294,16 @@ test "slice" {
     });
 }
 
-test "byte_array_ptr" {
+test "arrayPtr" {
+    try testCodecRoundTrips(*const [3]u32, .standard(.arrayPtr(.int)), {}, null, &.{
+        &.{ 0, 1, 2 },
+        &.{ 3, 4, 5 },
+        &.{ 7, 8, 9 },
+        &.{ 12, 13, 14 },
+        &.{ 18, 19, 20 },
+        &.{ 25, 26, 27 },
+    });
+
     try testCodecRoundTrips(*const [3]u8, .standard(.arrayPtr(.byte)), {}, {}, &.{
         "foo",
         "bar",
@@ -2817,18 +3317,7 @@ test "byte_array_ptr" {
     });
 }
 
-test "arrayPtr" {
-    try testCodecRoundTrips(*const [3]u32, .standard(.arrayPtr(.int)), {}, null, &.{
-        &.{ 0, 1, 2 },
-        &.{ 3, 4, 5 },
-        &.{ 7, 8, 9 },
-        &.{ 12, 13, 14 },
-        &.{ 18, 19, 20 },
-        &.{ 25, 26, 27 },
-    });
-}
-
-test "byte_array_list" {
+test "arrayList" {
     const gpa = std.testing.allocator;
 
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -2840,14 +3329,6 @@ test "byte_array_list" {
         .fromOwnedSlice(try arena.dupe(u8, "foo")),
         .fromOwnedSlice(try arena.dupe(u8, "baz")),
     });
-}
-
-test "arrayList" {
-    const gpa = std.testing.allocator;
-
-    var arena_state: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
 
     try testCodecRoundTrips(std.ArrayList(u32), .standard(.arrayList(.int)), {}, null, &.{
         .empty,
@@ -3204,6 +3685,7 @@ fn testCodecRoundTripsInner(
         .{ .int = .fixint, .endian = .big },
     };
     for (cfg_permutations) |config| {
+        errdefer std.log.err("Error occurred using config: {}", .{config});
         {
             buffer.clearRetainingCapacity();
             var encoded_writer_state: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buffer);
@@ -3238,6 +3720,32 @@ fn testCodecRoundTripsInner(
             dec_ctx,
         ));
         try std.testing.expectEqual(values.len, decoded_count);
+
+        var bvr_reader_buf: [64]u8 = undefined;
+        var bvr_value_buf: [codec.encode_min_size]u8 = undefined;
+        var bvr_progress_stack: [codec.encode_stack_size]u64 = @splat(0);
+        var bvr_state: codec.EncodedReader() = .initMany(values, .{
+            .reader_buffer = &bvr_reader_buf,
+            .value_buffer = &bvr_value_buf,
+            .progress_stack = &bvr_progress_stack,
+            .config = config,
+            .ctx = enc_ctx,
+        });
+        const bvr = &bvr_state.interface;
+
+        for (values, 0..) |expected, i| {
+            const actual = codec.decode(
+                bvr,
+                std.testing.allocator,
+                config,
+                dec_ctx,
+            );
+            defer if (actual) |*unwrapped| {
+                codec.free(std.testing.allocator, unwrapped, dec_ctx);
+            } else |_| {};
+            errdefer std.log.err("[{d}]: expected '{any}', actual: '{any}'", .{ i, expected, actual });
+            try testing.expectEqualDeepWithOverrides(expected, actual, compare_ctx);
+        }
     }
 }
 
