@@ -38,6 +38,14 @@ pub const Config = struct {
     }
 };
 
+pub const EncodedCounts = struct {
+    /// The number of values which were fully encoded to the writer.
+    value_count: usize,
+    /// The number of encoded bytes; this may be nonzero even when `value_count` is zero,
+    /// since it also includes bytes from partial writes of values.
+    byte_count: usize,
+};
+
 pub const EncodeError = error{
     /// Codec implementation failed to encode value.
     EncodeFailed,
@@ -67,22 +75,53 @@ pub fn Codec(comptime V: type) type {
         /// Encodes all `values[i]` to the `writer` stream sequentially, in a manner defined by the implementation.
         /// The implementation should treat each `values[i]` as independent from all other `values[j]`.
         ///
-        /// Returns the number of `values` that were successfully encoded; implementations may choose to encode however
-        /// many they want to. Must be at least 1.
+        /// Returns the number of `values` that were successfully encoded, and the number of encoded bytes that were
+        /// written; implementations may choose to encode however many values they want to.
+        ///
+        /// If `limit == .unlimited`, the implementation is obligated to write a minimum of one value.
+        /// If `limit != .unlimited`, the implementation may write one or more values, or zero if one whole value
+        /// would not fit within the specified limit; if zero values are written, the implementation must have written
+        /// a non-zero number of encoded bytes.
         ///
         /// The implementation is allowed to assume/assert the following invariants:
         /// * `values.len != 0`.
+        /// * `limit >= encode_min_size`.
+        /// * `progress_stack` is `@splat(0)`, or it was updated by a previous call to `encodeFn`.
+        /// * If `limit != .unlimited` and `encode_stack_size != 0`, `progress_stack != null`.
         encodeFn: fn (
             writer: *std.Io.Writer,
             config: Config,
             values: []const V,
+            /// Must be a value of type `?*[encode_stack_size]u64`.
+            /// If non-null, and `encode_stack_size != 0`, `progress_stack[n]` can be used by
+            /// the implementation to store encoding progress at a given level of nesting.
+            /// Once all highest indices of the stack have reset to zero, the parent nested
+            /// index should also reset to zero.
+            ///
+            /// For example: if the implementation encodes array values, but the given `limit`
+            /// does not permit encoding all elements of the array at `values[0]`, `progress_stack[0]`
+            /// should be used to store the index of the last element that wasn't (fully) encoded,
+            /// such that the subsequent call would observe that index, and resume encoding starting
+            /// from that element.
+            ///
+            /// NOTE: this should not be used to keep track of the index in `values`, since
+            /// this slice parameter will be truncated in subsequent calls as the return
+            /// value's `value_count` field permits.
+            ///
+            /// `@splat(0)` is the initial valid state.
+            progress_stack: anytype,
+            /// The maximum number of bytes the implementation is allowed to write to `writer`.
+            limit: std.Io.Limit,
             /// Must be a value of type `EncodeCtx`.
             ctx: anytype,
-        ) EncodeToWriterError!usize,
+        ) EncodeToWriterError!EncodedCounts,
 
         /// The minimum number of encoded bytes that `encodeFn` must be allowed to write.
         /// The implementation may still write fewer encoded bytes than this.
         encode_min_size: usize,
+
+        /// The size of the progress stack used by `encodeFn`.
+        encode_stack_size: usize,
 
         /// The type of the context consumed by `decodeInitFn`, `decodeFn`, and `freeFn`.
         DecodeCtx: type,
@@ -205,17 +244,36 @@ pub fn Codec(comptime V: type) type {
 
             // since each partial call must encode a minimum of one value,
             // there is an upper bound on these iterations of `values.len`.
-            var count: usize = 0;
+            var value_count: usize = 0;
             for (0..values.len) |_| {
-                const remaining = values[count..];
-                const incr = try self.encodeManyPartialRaw(writer, config, remaining, ctx);
+                const remaining = values[value_count..];
+                const counts = try self.encodeManyPartialRaw(writer, config, remaining, null, .unlimited, ctx);
                 // sanity checks
-                std.debug.assert(incr != 0);
-                std.debug.assert(incr <= remaining.len);
-                std.debug.assert(count + incr <= values.len);
-                count += incr;
-                if (count == values.len) break;
+                std.debug.assert(counts.value_count != 0);
+                std.debug.assert(counts.value_count <= remaining.len);
+                std.debug.assert(value_count + counts.value_count <= values.len);
+                value_count += counts.value_count;
+                if (value_count == values.len) break;
             } else unreachable;
+        }
+
+        pub fn encodeOnePartialRaw(
+            self: CodecSelf,
+            writer: *std.Io.Writer,
+            config: Config,
+            value: *const V,
+            progress_stack: ?*[self.encode_stack_size]u64,
+            limit: std.Io.Limit,
+            ctx: self.EncodeCtx,
+        ) EncodeToWriterError!EncodedCounts {
+            return self.encodeManyPartialRaw(
+                writer,
+                config,
+                @ptrCast(value),
+                progress_stack,
+                limit,
+                ctx,
+            );
         }
 
         pub fn encodeManyPartialRaw(
@@ -223,12 +281,33 @@ pub fn Codec(comptime V: type) type {
             writer: *std.Io.Writer,
             config: Config,
             values: []const V,
+            progress_stack: ?*[self.encode_stack_size]u64,
+            limit: std.Io.Limit,
             ctx: self.EncodeCtx,
-        ) EncodeToWriterError!usize {
-            if (values.len == 0) return 0;
-            const value_count = try self.encodeFn(writer, config, values, ctx);
-            std.debug.assert(value_count <= values.len);
-            return value_count;
+        ) EncodeToWriterError!EncodedCounts {
+            if (limit.toInt()) |byte_limit| {
+                std.debug.assert(byte_limit >= self.encode_min_size);
+            }
+
+            switch (limit) {
+                .unlimited => std.debug.assert(progress_stack == null),
+                .nothing, _ => std.debug.assert(self.encode_stack_size == 0 or progress_stack != null),
+            }
+
+            if (values.len == 0) return .{
+                .value_count = 0,
+                .byte_count = 0,
+            };
+
+            const counts = try self.encodeFn(writer, config, values, progress_stack, limit, ctx);
+            std.debug.assert(counts.value_count <= values.len);
+            if (limit.toInt()) |byte_limit| {
+                std.debug.assert(counts.byte_count <= byte_limit);
+                std.debug.assert(counts.byte_count != 0 or counts.value_count != 0);
+            } else {
+                std.debug.assert(counts.value_count != 0);
+            }
+            return counts;
         }
 
         /// Returns the number of bytes occupied by the encoded representation of `value.*`.
@@ -527,6 +606,119 @@ pub fn Codec(comptime V: type) type {
             return constructor.codec;
         }
 
+        pub fn EncodedReader(codec: CodecSelf) type {
+            return struct {
+                interface: std.Io.Reader,
+                value_fbw: std.Io.Writer,
+                config: Config,
+                ctx: codec.EncodeCtx,
+                values: []const V,
+                value_count: usize,
+                progress_stack: *[codec.encode_stack_size]u64,
+                const EncodedReaderSelf = @This();
+
+                pub const InitParams = struct {
+                    reader_buffer: []u8,
+                    /// Asserted to be `.len >= codec.encode_min_size`.
+                    value_buffer: []u8,
+                    progress_stack: *[codec.encode_stack_size]u64,
+                    config: Config,
+                    ctx: codec.EncodeCtx,
+                };
+
+                pub fn initOne(
+                    value: *const V,
+                    params: InitParams,
+                ) EncodedReaderSelf {
+                    return .initMany(@ptrCast(value), params);
+                }
+
+                pub fn initMany(
+                    values: []const V,
+                    params: InitParams,
+                ) EncodedReaderSelf {
+                    std.debug.assert(params.value_buffer.len >= codec.encode_min_size);
+                    return .{
+                        .interface = .{
+                            .vtable = &vtable,
+                            .buffer = params.reader_buffer,
+                            .seek = 0,
+                            .end = 0,
+                        },
+                        .value_fbw = .fixed(params.value_buffer),
+                        .config = params.config,
+                        .ctx = params.ctx,
+                        .values = values,
+                        .value_count = 0,
+                        .progress_stack = params.progress_stack,
+                    };
+                }
+
+                pub fn reset(self: *EncodedReaderSelf) void {
+                    self.interface.seek = 0;
+                    self.interface.end = 0;
+                    self.value_fbw.end = 0;
+                    self.value_count = 0;
+                    @memset(self.progress_stack, 0);
+                }
+
+                const vtable: std.Io.Reader.VTable = .{
+                    .stream = stream,
+                };
+
+                fn stream(
+                    r: *std.Io.Reader,
+                    w: *std.Io.Writer,
+                    limit: std.Io.Limit,
+                ) std.Io.Reader.StreamError!usize {
+                    const self: *EncodedReaderSelf = @fieldParentPtr("interface", r);
+
+                    if (self.value_count == self.values.len and self.value_fbw.end == 0) {
+                        return error.EndOfStream;
+                    }
+
+                    const buffered_consumed_count = limit.minInt(self.value_fbw.end);
+                    const remaining_limit = limit.subtract(buffered_consumed_count).?;
+                    try w.writeAll(limit.sliceConst(self.value_fbw.buffered()));
+                    _ = self.value_fbw.consume(buffered_consumed_count);
+
+                    if (remaining_limit.toInt()) |byte_limit| {
+                        if (byte_limit < codec.encode_min_size) {
+                            if (self.value_fbw.unusedCapacityLen() >= codec.encode_min_size) {
+                                const counts = codec.encodeManyPartialRaw(
+                                    &self.value_fbw,
+                                    self.config,
+                                    self.values[self.value_count..],
+                                    self.progress_stack,
+                                    .limited(self.value_fbw.unusedCapacityLen()),
+                                    self.ctx,
+                                ) catch |err| switch (err) {
+                                    error.EncodeFailed => return error.ReadFailed,
+                                    error.WriteFailed => |e| return e,
+                                };
+                                self.value_count += counts.value_count;
+                            }
+                            return buffered_consumed_count;
+                        }
+                    }
+
+                    const counts = codec.encodeManyPartialRaw(
+                        w,
+                        self.config,
+                        self.values[self.value_count..],
+                        self.progress_stack,
+                        remaining_limit,
+                        self.ctx,
+                    ) catch |err| switch (err) {
+                        error.EncodeFailed => return error.ReadFailed,
+                        error.WriteFailed => |e| return e,
+                    };
+                    self.value_count += counts.value_count;
+                    return buffered_consumed_count + counts.byte_count;
+                }
+            };
+        }
+
         // -- Helpers for safely implementing common codecs -- //
 
         /// Expects `methods` to be a namespace with the following methods defined:
@@ -545,7 +737,8 @@ pub fn Codec(comptime V: type) type {
             return .{
                 .EncodeCtx = EncodeCtx,
                 .encodeFn = erased.encode,
-                .encode_min_size = methods.encode_min_size,
+                .encode_min_size = erased.encode_min_size,
+                .encode_stack_size = erased.encode_stack_size,
 
                 .DecodeCtx = DecodeCtx,
                 .decodeInitFn = if (@TypeOf(methods.decodeInit) != @TypeOf(null)) erased.decodeInit else null,
@@ -572,16 +765,23 @@ pub fn Codec(comptime V: type) type {
                     writer: *std.Io.Writer,
                     config: Config,
                     values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
                     ctx: anytype,
-                ) EncodeToWriterError!usize {
+                ) EncodeToWriterError!EncodedCounts {
                     if (@TypeOf(ctx) != EncodeCtx) @compileError(
                         "Expected type " ++ @typeName(EncodeCtx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
                     );
                     std.debug.assert(values.len != 0);
-                    return try methods.encode(writer, config, values, ctx);
+                    if (limit.toInt()) |byte_limit| {
+                        std.debug.assert(byte_limit >= encode_min_size);
+                    }
+                    return try methods.encode(writer, config, values, progress_stack, limit, ctx);
                 }
 
                 pub const encode_min_size: usize = methods.encode_min_size;
+
+                pub const encode_stack_size: usize = methods.encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
