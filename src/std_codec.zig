@@ -2161,12 +2161,18 @@ pub fn StdCodec(comptime V: type) type {
                         "array ptr codec is not implemented for type " ++ @typeName(V),
                     );
                 }
-                const AsSlice = @Type(.{ .pointer = info: {
-                    var info = ptr_info;
-                    info.size = .slice;
-                    info.child = Element;
-                    break :info info;
-                } });
+                const AsSlice = @Pointer(
+                    .slice,
+                    .{
+                        .@"const" = ptr_info.is_const,
+                        .@"volatile" = ptr_info.is_volatile,
+                        .@"allowzero" = ptr_info.is_allowzero,
+                        .@"addrspace" = ptr_info.address_space,
+                        .@"align" = ptr_info.alignment,
+                    },
+                    Element,
+                    null,
+                );
 
                 const slice_codec: bk.Codec(AsSlice) = .standard(.slice(element));
                 const array_codec: bk.Codec(ptr_info.child) = .standard(.array(element));
@@ -2787,26 +2793,21 @@ pub fn StdCodec(comptime V: type) type {
                 inline //
                 .@"struct",
                 .@"union",
-                => |info, tag| break :blk @Type(.{ .@"struct" = .{
-                    .layout = .auto,
-                    .backing_integer = null,
-                    .is_tuple = tag == .@"struct" and info.is_tuple,
-                    .decls = &.{},
-                    .fields = fields: {
-                        var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
-                        for (&fields, info.fields) |*ctx_field, v_field| {
-                            const FieldCodec = StdCodec(v_field.type);
-                            ctx_field.* = .{
-                                .name = v_field.name,
-                                .type = FieldCodec,
-                                .default_value_ptr = null,
-                                .is_comptime = false,
-                                .alignment = @alignOf(FieldCodec),
-                            };
-                        }
-                        break :fields &fields;
-                    },
-                } }),
+                => |info, tag| {
+                    var names: [info.fields.len][:0]const u8 = undefined;
+                    var types: [info.fields.len]type = undefined;
+                    for (info.fields, &names, &types) |v_field, *name, *T| {
+                        const FieldCodec = StdCodec(v_field.type);
+                        name.* = v_field.name;
+                        T.* = FieldCodec;
+                    }
+
+                    if (tag == .@"struct" and info.is_tuple) {
+                        break :blk @Tuple(&types);
+                    } else {
+                        break :blk @Struct(.auto, null, &names, &types, &@splat(.{}));
+                    }
+                },
                 else => {},
             }
             @compileError(@typeName(V) ++ " is not a struct or a union");
@@ -2831,14 +2832,28 @@ pub fn StdCodec(comptime V: type) type {
             var max_encode_min_size: usize = 0;
             var max_encode_stack_size: usize = 0;
 
+            var field_names: [fields.len][]const u8 = undefined;
+
             var enc_field_kind_max: FieldGroupKind = .all_void;
-            var encode_fields: [fields.len]std.builtin.Type.StructField = undefined;
+            var encode_field_types: [fields.len]type = undefined;
+            var encode_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
 
             var dec_field_kind_max: FieldGroupKind = .all_void;
-            var decode_fields: [fields.len]std.builtin.Type.StructField = undefined;
+            var decode_field_types: [fields.len]type = undefined;
+            var decode_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
 
             @setEvalBranchQuota(fields.len * 5 + 2);
-            for (&encode_fields, &decode_fields, fields) |*encode_field, *decode_field, field| {
+            for (
+                fields,
+
+                &field_names,
+
+                &encode_field_types,
+                &encode_field_attrs,
+
+                &decode_field_types,
+                &decode_field_attrs,
+            ) |field, *name, *EncodeType, *encode_attr, *DecodeType, *decode_attr| {
                 const std_field_codec: bk.Codec(field.type) = @field(field_codecs, field.name).codec;
 
                 any_decode_init = any_decode_init or std_field_codec.decodeInitFn != null;
@@ -2846,41 +2861,43 @@ pub fn StdCodec(comptime V: type) type {
                 max_encode_min_size = @max(max_encode_min_size, std_field_codec.encode_min_size);
                 max_encode_stack_size = @max(max_encode_stack_size, std_field_codec.encode_stack_size);
 
+                name.* = field.name;
+
                 const enc_field_kind: FieldGroupKind = .fromType(std_field_codec.EncodeCtx);
                 enc_field_kind_max = .max(enc_field_kind_max, enc_field_kind);
-                encode_field.* = .{
-                    .name = field.name,
-                    .type = std_field_codec.EncodeCtx,
+                EncodeType.* = std_field_codec.EncodeCtx;
+                encode_attr.* = .{
+                    .@"comptime" = enc_field_kind == .all_void,
                     .default_value_ptr = if (enc_field_kind == .all_void) @ptrCast(&{}) else null,
-                    .is_comptime = enc_field_kind == .all_void,
-                    .alignment = @alignOf(std_field_codec.EncodeCtx),
                 };
 
                 const dec_field_kind: FieldGroupKind = .fromType(std_field_codec.DecodeCtx);
                 dec_field_kind_max = .max(dec_field_kind_max, dec_field_kind);
-                decode_field.* = .{
-                    .name = field.name,
-                    .type = std_field_codec.DecodeCtx,
+                DecodeType.* = std_field_codec.DecodeCtx;
+                decode_attr.* = .{
+                    .@"comptime" = dec_field_kind == .all_void,
                     .default_value_ptr = if (dec_field_kind == .all_void) @ptrCast(&{}) else null,
-                    .is_comptime = dec_field_kind == .all_void,
-                    .alignment = @alignOf(std_field_codec.DecodeCtx),
                 };
             }
 
-            const Enc = @Type(.{ .@"struct" = .{
-                .layout = .auto,
-                .backing_integer = null,
-                .is_tuple = is_tuple,
-                .decls = &.{},
-                .fields = &encode_fields,
-            } });
-            const Dec = @Type(.{ .@"struct" = .{
-                .layout = .auto,
-                .backing_integer = null,
-                .is_tuple = is_tuple,
-                .decls = &.{},
-                .fields = &decode_fields,
-            } });
+            const Enc = if (is_tuple) @Tuple(
+                &encode_field_types,
+            ) else @Struct(
+                .auto,
+                null,
+                &field_names,
+                &encode_field_types,
+                &encode_field_attrs,
+            );
+            const Dec = if (is_tuple) @Tuple(
+                &decode_field_types,
+            ) else @Struct(
+                .auto,
+                null,
+                &field_names,
+                &decode_field_types,
+                &decode_field_attrs,
+            );
 
             return .{
                 switch (enc_field_kind_max) {
