@@ -353,29 +353,13 @@ pub fn Codec(comptime V: type) type {
             value: *const V,
             ctx: self.EncodeCtx,
         ) (EncodeError || std.mem.Allocator.Error)![]u8 {
-            var list: std.ArrayList(u8) = .empty;
-            defer list.deinit(gpa);
-            try self.encodeToArrayList(gpa, &list, config, value, ctx);
-            return try list.toOwnedSlice(gpa);
-        }
-
-        /// Encodes `value.*`, appending the encoded representation to `list`, growing it with `gpa`.
-        /// Conveniently translates `error.WriteFailed` into `error.OutOfMemory`.
-        pub fn encodeToArrayList(
-            self: CodecSelf,
-            gpa: std.mem.Allocator,
-            list: *std.ArrayList(u8),
-            config: Config,
-            value: *const V,
-            ctx: self.EncodeCtx,
-        ) (EncodeError || std.mem.Allocator.Error)!void {
-            var allocating: std.Io.Writer.Allocating = .fromArrayList(gpa, list);
-            defer list.* = allocating.toArrayList();
-            const writer = &allocating.writer;
-            self.encode(writer, config, value, ctx) catch |err| switch (err) {
+            var aw: std.Io.Writer.Allocating = .init(gpa);
+            defer aw.deinit();
+            self.encode(&aw.writer, config, value, ctx) catch |err| switch (err) {
                 error.EncodeFailed => |e| return e,
                 error.WriteFailed => return error.OutOfMemory, // the allocating writer's only failure is OOM
             };
+            return try aw.toOwnedSlice();
         }
 
         /// Decodes the value from the `reader` stream and returns it.
