@@ -1,226 +1,311 @@
 const std = @import("std");
+const bk = @import("binkode.zig");
 
-pub fn expectEqualDeepWithOverrides(
-    expected: anytype,
-    actual: anytype,
-    /// Expects methods:
-    /// * `fn compare(expected: anytype, actual: @TypeOf(expected)) !bool`:
-    ///   Should return true if the values were compared, and otherwise false
-    ///   to fall back to default handling of comparison.
-    compare_ctx: anytype,
-) !void {
-    var sub_accesses: std.ArrayList(SubAccess) = .{};
-    defer sub_accesses.deinit(std.testing.allocator);
-    errdefer testPrint("Difference occurs at `expected{f}`", .{
-        SubAccess.suffixListFmt(sub_accesses.items),
-    });
-    expectEqualDeepWithOverridesImpl(
-        expected,
-        actual,
-        &sub_accesses,
-        compare_ctx,
-    ) catch |err| {
-        if (@errorReturnTrace()) |ert| ert.index = 0;
-        return err;
-    };
-}
+pub const TestExpectedEqualError = error{TestExpectedEqual};
 
-const SubAccess = union(enum) {
-    field: []const u8,
-    index: usize,
+pub fn Comparator(comptime V: type) type {
+    return struct {
+        Ctx: type,
+        expectEqualFn: fn (
+            /// Must be a value of type `Ctx`.
+            ctx: anytype,
+            expected: *const V,
+            actual: *const V,
+        ) TestExpectedEqualError!void,
+        const ComparatorSelf = @This();
 
-    fn suffixListFmt(items: []const SubAccess) SuffixListFmt {
-        return .{ .items = items };
-    }
+        pub fn withCtx(self: ComparatorSelf, ctx: self.Ctx) WithCtx(self) {
+            return .{ .ctx = ctx };
+        }
 
-    const SuffixListFmt = struct {
-        items: []const SubAccess,
+        pub fn WithCtx(comparator: ComparatorSelf) type {
+            return struct {
+                ctx: comparator.Ctx,
+                const WithCtxSelf = @This();
 
-        pub fn format(
-            self: SuffixListFmt,
-            writer: *std.Io.Writer,
-        ) std.Io.Writer.Error!void {
-            for (self.items) |access| switch (access) {
-                .field => |field| try writer.print(".{f}", .{std.zig.fmtIdPU(field)}),
-                .index => |index| try writer.print("[{d}]", .{index}),
+                pub fn expectEqual(
+                    self: *const WithCtxSelf,
+                    expected: V,
+                    actual: V,
+                ) TestExpectedEqualError!void {
+                    try self.expectEqualNoCopy(&expected, &actual);
+                }
+
+                pub fn expectEqualNoCopy(
+                    self: *const WithCtxSelf,
+                    expected: *const V,
+                    actual: *const V,
+                ) TestExpectedEqualError!void {
+                    return comparator.expectEqualFn(self.ctx, expected, actual);
+                }
+            };
+        }
+
+        pub fn expectEqual(
+            self: ComparatorSelf,
+            expected: V,
+            actual: V,
+        ) TestExpectedEqualError!void {
+            try self.expectEqualNoCopy(&expected, &actual);
+        }
+
+        pub fn expectEqualNoCopy(
+            self: ComparatorSelf,
+            expected: *const V,
+            actual: *const V,
+        ) TestExpectedEqualError!void {
+            if (self.Ctx != void) @compileError("Use .withCtx(ctx) instead");
+            return self.expectEqualFn({}, expected, actual);
+        }
+
+        /// Shallow comparison context.
+        pub const shallow: ComparatorSelf = .implement(void, struct {
+            pub fn expectEqual(
+                _: void,
+                expected: *const V,
+                actual: *const V,
+            ) TestExpectedEqualError!void {
+                try std.testing.expectEqual(expected.*, actual.*);
+            }
+        });
+
+        /// Shallow comparison context.
+        pub const deep: ComparatorSelf = .implement(void, struct {
+            pub fn expectEqual(
+                _: void,
+                expected: *const V,
+                actual: *const V,
+            ) TestExpectedEqualError!void {
+                try std.testing.expectEqualDeep(expected.*, actual.*);
+            }
+        });
+
+        const ptr_info = switch (@typeInfo(V)) {
+            .pointer => |info| info,
+            else => @compileError(@typeName(V) ++ " is not a pointer."),
+        };
+        const SliceElem = switch (ptr_info.size) {
+            .slice => ptr_info.child,
+            .many => if (ptr_info.sentinel_ptr != null)
+                ptr_info.child
+            else
+                @compileError(@typeName(V) ++ " cannot be sliced (no sentinel)."),
+            .one => switch (@typeInfo(ptr_info.child)) {
+                .array => |array_info| array_info.child,
+                else => @compileError(@typeName(V) ++ " is not a slice."),
+            },
+            else => @compileError(@typeName(V) ++ " is not a slice."),
+        };
+
+        pub fn forSlice(elem: Comparator(SliceElem)) ComparatorSelf {
+            return .implement(void, struct {
+                pub fn expectEqual(
+                    elem_ctx: elem.Ctx,
+                    expected: *const V,
+                    actual: *const V,
+                ) TestExpectedEqualError!void {
+                    try std.testing.expectEqual(expected.*.len, actual.*.len);
+                    for (expected.*, actual.*, 0..) |*expected_item, *actual_item, index| {
+                        errdefer testPrint(
+                            "Difference occurred at entry {d}: {any} != {any}",
+                            .{ index, actual_item.*, expected_item.* },
+                        );
+                        try elem.withCtx(elem_ctx).expectEqualNoCopy(expected_item, actual_item);
+                    }
+                }
+            });
+        }
+
+        const al_info = bk.std_reflect.ArrayListInfo.from(V) orelse @compileError(
+            @typeName(V) ++ " is not an `ArrayList`.",
+        );
+        pub fn forArrayList(elem: Comparator(al_info.Element)) ComparatorSelf {
+            return .implement(elem.Ctx, struct {
+                pub fn expectEqual(
+                    elem_ctx: elem.Ctx,
+                    expected: *const V,
+                    actual: *const V,
+                ) TestExpectedEqualError!void {
+                    try std.testing.expectEqual(expected.items.len, actual.items.len);
+                    for (expected.items, actual.items, 0..) |*expected_item, *actual_item, index| {
+                        errdefer testPrint(
+                            "Difference occurred at entry {d}: {any} != {any}",
+                            .{ index, actual_item.*, expected_item.* },
+                        );
+                        try elem.withCtx(elem_ctx).expectEqualNoCopy(expected_item, actual_item);
+                    }
+                }
+            });
+        }
+
+        const hm_info = bk.std_reflect.ArrayHashMapInfo.from(V) orelse @compileError(
+            @typeName(V) ++ " is not an `ArrayHashMap`.",
+        );
+
+        pub fn ArrayHashMapCtxs(
+            comptime KeyCtx: type,
+            comptime ValCtx: type,
+        ) type {
+            return struct {
+                key: KeyCtx,
+                val: ValCtx,
+            };
+        }
+
+        pub fn forArrayHashMap(
+            key_cmp: Comparator(hm_info.K),
+            val_cmp: Comparator(hm_info.V),
+        ) ComparatorSelf {
+            const KeyValCtxs = ArrayHashMapCtxs(key_cmp.Ctx, val_cmp.Ctx);
+            const kv_fgk: bk.std_reflect.FieldGroupKind = .max(
+                .fromType(key_cmp.Ctx),
+                .fromType(val_cmp.Ctx),
+            );
+            const CtxParam = switch (kv_fgk) {
+                .all_void => void,
+                .all_opt_or_void => ?KeyValCtxs,
+                .some_required => KeyValCtxs,
+            };
+            return .implement(CtxParam, struct {
+                pub fn expectEqual(
+                    maybe_kv_ctx: CtxParam,
+                    expected: *const V,
+                    actual: *const V,
+                ) TestExpectedEqualError!void {
+                    const key_ctx, const val_ctx = switch (kv_fgk) {
+                        .all_void => .{ {}, {} },
+                        .all_opt_or_void => if (maybe_kv_ctx) |kv_ctx| .{ kv_ctx.key, kv_ctx.val },
+                        .some_required => .{ maybe_kv_ctx.key, maybe_kv_ctx.val },
+                    };
+
+                    try std.testing.expectEqual(expected.count(), actual.count());
+                    for (
+                        expected.keys(),
+                        actual.keys(),
+                        expected.values(),
+                        actual.values(),
+                        0..,
+                    ) |*expected_key, *actual_key, *expected_val, *actual_val, index| {
+                        errdefer testPrint(
+                            "Difference occurred at entry {d}: .{{ {any}, {any} }} != .{{ {any}, {any} }}",
+                            .{
+                                index,
+                                expected_key.*,
+                                expected_val.*,
+                                actual_key.*,
+                                actual_val.*,
+                            },
+                        );
+                        try key_cmp.withCtx(key_ctx).expectEqualNoCopy(expected_key, actual_key);
+                        try val_cmp.withCtx(val_ctx).expectEqualNoCopy(expected_val, actual_val);
+                    }
+                }
+            });
+        }
+
+        const optional_info = switch (@typeInfo(V)) {
+            .optional => |info| info,
+            else => @compileError(@typeName(V) ++ " is not an error union."),
+        };
+
+        pub fn forOptional(
+            payload: Comparator(optional_info.payload),
+        ) ComparatorSelf {
+            return .implement(payload.Ctx, struct {
+                pub fn expectEqual(
+                    pl_ctx: payload.Ctx,
+                    expected: *const V,
+                    actual: *const V,
+                ) TestExpectedEqualError!void {
+                    if (expected.*) |*expected_pl| {
+                        if (actual.*) |*actual_pl| {
+                            try payload.withCtx(pl_ctx).expectEqualNoCopy(expected_pl, actual_pl);
+                        } else |actual_err| {
+                            testPrint(
+                                "Expected {any}, got {s}.",
+                                .{ expected_pl.*, @errorName(actual_err) },
+                            );
+                            return error.TestExpectedEqual;
+                        }
+                    } else {
+                        if (actual.*) |*actual_pl| {
+                            testPrint(
+                                "Expected null, got {any}.",
+                                .{actual_pl.*},
+                            );
+                            return error.TestExpectedEqual;
+                        }
+                    }
+                }
+            });
+        }
+
+        const error_union_info = switch (@typeInfo(V)) {
+            .error_union => |info| info,
+            else => @compileError(@typeName(V) ++ " is not an error union."),
+        };
+
+        pub fn forErrorUnion(
+            payload: Comparator(error_union_info.payload),
+        ) ComparatorSelf {
+            return .implement(payload.Ctx, struct {
+                pub fn expectEqual(
+                    pl_ctx: payload.Ctx,
+                    expected: *const V,
+                    actual: *const V,
+                ) TestExpectedEqualError!void {
+                    if (expected.*) |*expected_pl| {
+                        if (actual.*) |*actual_pl| {
+                            try payload.withCtx(pl_ctx).expectEqualNoCopy(expected_pl, actual_pl);
+                        } else |actual_err| {
+                            testPrint(
+                                "Expected {any}, got {s}.",
+                                .{ expected_pl.*, @errorName(actual_err) },
+                            );
+                            return error.TestExpectedEqual;
+                        }
+                    } else |expected_err| {
+                        if (actual.*) |*actual_pl| {
+                            testPrint(
+                                "Expected {any}, got {any}.",
+                                .{ expected_err, actual_pl.* },
+                            );
+                            return error.TestExpectedEqual;
+                        } else |actual_err| {
+                            try std.testing.expectEqual(expected_err, actual_err);
+                        }
+                    }
+                }
+            });
+        }
+
+        // --- helpers for implementation --- //
+
+        pub fn implement(
+            comptime Ctx: type,
+            comptime methods: type,
+        ) ComparatorSelf {
+            const erased = struct {
+                fn expectEqualFn(
+                    ctx: anytype,
+                    expected: *const V,
+                    actual: *const V,
+                ) TestExpectedEqualError!void {
+                    if (@TypeOf(ctx) != Ctx) @compileError(
+                        "Expected type " ++ @typeName(Ctx) ++ ", got " ++ @typeName(@TypeOf(ctx)),
+                    );
+                    try methods.expectEqual(ctx, expected, actual);
+                }
+            };
+            return .{
+                .Ctx = Ctx,
+                .expectEqualFn = erased.expectEqualFn,
             };
         }
     };
-};
-
-fn expectEqualDeepWithOverridesImpl(
-    expected: anytype,
-    actual: anytype,
-    sub_accesses: *std.ArrayList(SubAccess),
-    /// Expects methods:
-    /// * `fn compare(expected: anytype, actual: @TypeOf(expected)) !bool`:
-    ///   Should return true if the values were compared, and otherwise false
-    ///   to fall back to default handling of comparison.
-    compare_ctx: anytype,
-) !void {
-    const T = @TypeOf(expected, actual);
-    if (@TypeOf(expected) != T or @TypeOf(actual) != T) return expectEqualDeepWithOverridesImpl(
-        @as(T, expected),
-        @as(T, actual),
-        sub_accesses,
-        compare_ctx,
-    );
-
-    if (try compare_ctx.compare(expected, actual)) return;
-    switch (@typeInfo(T)) {
-        else => try std.testing.expectEqualDeep(expected, actual),
-        .vector => |info| {
-            const expected_array: [info.len]info.child = expected;
-            const actual_array: [info.len]info.child = actual;
-            return expectEqualDeepWithOverridesImpl(
-                expected_array,
-                actual_array,
-                sub_accesses,
-                compare_ctx,
-            );
-        },
-        .array => |info| {
-            const expected_slice: []const info.child = &expected;
-            const actual_slice: []const info.child = &actual;
-            return expectEqualDeepWithOverridesImpl(
-                expected_slice,
-                actual_slice,
-                sub_accesses,
-                compare_ctx,
-            );
-        },
-        .pointer => |pointer| switch (pointer.size) {
-            .c => try std.testing.expectEqual(expected, actual),
-            .many => if (pointer.sentinel()) |sentinel| {
-                const expected_slice = std.mem.sliceTo(expected, sentinel);
-                const actual_slice = std.mem.sliceTo(actual, sentinel);
-                return expectEqualDeepWithOverridesImpl(
-                    expected_slice,
-                    actual_slice,
-                    sub_accesses,
-                    compare_ctx,
-                );
-            } else return std.testing.expectEqual(expected, actual),
-            .one => switch (@typeInfo(pointer.child)) {
-                .@"fn", .@"opaque" => try std.testing.expectEqual(expected, actual),
-                else => return expectEqualDeepWithOverridesImpl(
-                    expected.*,
-                    actual.*,
-                    sub_accesses,
-                    compare_ctx,
-                ),
-            },
-            .slice => {
-                if (expected.len != actual.len) {
-                    testPrint("Slice len not the same, expected {d}, found {d}\n", .{
-                        expected.len,
-                        actual.len,
-                    });
-                    return error.TestExpectedEqual;
-                }
-
-                try sub_accesses.ensureUnusedCapacity(std.testing.allocator, 1);
-                var i: usize = 0;
-                while (i < expected.len) : (i += 1) {
-                    sub_accesses.appendAssumeCapacity(.{ .index = i });
-                    try expectEqualDeepWithOverridesImpl(
-                        expected[i],
-                        actual[i],
-                        sub_accesses,
-                        compare_ctx,
-                    );
-                    _ = sub_accesses.pop();
-                }
-            },
-        },
-
-        .@"struct" => |info| {
-            try sub_accesses.ensureUnusedCapacity(std.testing.allocator, 1);
-            inline for (info.fields) |field| {
-                sub_accesses.appendAssumeCapacity(.{ .field = field.name });
-                try expectEqualDeepWithOverridesImpl(
-                    @field(expected, field.name),
-                    @field(actual, field.name),
-                    sub_accesses,
-                    compare_ctx,
-                );
-                _ = sub_accesses.pop();
-            }
-        },
-        .@"union" => |info| {
-            const Tag = info.tag_type orelse
-                @compileError("Unable to compare untagged union values");
-
-            const expected_tag: Tag = expected;
-            const actual_tag: Tag = actual;
-            try expectEqualDeepWithOverridesImpl(
-                expected_tag,
-                actual_tag,
-                sub_accesses,
-                compare_ctx,
-            );
-
-            switch (expected) {
-                inline else => |expected_val, tag| {
-                    const actual_val = @field(actual, @tagName(tag));
-                    try sub_accesses.append(std.testing.allocator, .{ .field = @tagName(tag) });
-                    try expectEqualDeepWithOverridesImpl(
-                        expected_val,
-                        actual_val,
-                        sub_accesses,
-                        compare_ctx,
-                    );
-                    _ = sub_accesses.pop();
-                },
-            }
-        },
-        .optional => if (expected) |expected_payload| {
-            if (actual) |actual_payload| {
-                try expectEqualDeepWithOverridesImpl(
-                    expected_payload,
-                    actual_payload,
-                    sub_accesses,
-                    compare_ctx,
-                );
-            } else {
-                testPrint("expected {any}, found null\n", .{expected_payload});
-                return error.TestExpectedEqual;
-            }
-        } else {
-            if (actual) |actual_payload| {
-                testPrint("expected null, found {any}\n", .{actual_payload});
-                return error.TestExpectedEqual;
-            }
-        },
-        .error_union => if (expected) |expected_payload| {
-            if (actual) |actual_payload| {
-                try expectEqualDeepWithOverridesImpl(
-                    expected_payload,
-                    actual_payload,
-                    sub_accesses,
-                    compare_ctx,
-                );
-            } else |actual_err| {
-                testPrint("expected {any}, found {any}\n", .{ expected_payload, actual_err });
-                return error.TestExpectedEqual;
-            }
-        } else |expected_err| {
-            if (actual) |actual_payload| {
-                testPrint("expected {any}, found {any}\n", .{ expected_err, actual_payload });
-                return error.TestExpectedEqual;
-            } else |actual_err| {
-                try expectEqualDeepWithOverridesImpl(
-                    expected_err,
-                    actual_err,
-                    sub_accesses,
-                    compare_ctx,
-                );
-            }
-        },
-    }
 }
 
-fn testPrint(comptime fmt: []const u8, args: anytype) void {
+pub fn testPrint(comptime fmt: []const u8, args: anytype) void {
     if (@inComptime()) {
         @compileError(std.fmt.comptimePrint(fmt, args));
     } else if (std.testing.backend_can_print) {

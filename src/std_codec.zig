@@ -1303,7 +1303,7 @@ pub fn StdCodec(comptime V: type) type {
             = FieldContexts(payload_codecs);
             const DecodeCtx = TaggedUnionDecodeCtxGeneric(PayloadDecodeCtx);
 
-            const pl_field_kind: FieldGroupKind = .fromType(@FieldType(DecodeCtx, "pl"));
+            const pl_field_kind: bk.std_reflect.FieldGroupKind = .fromType(@FieldType(DecodeCtx, "pl"));
             const any_free = free_req == .need_free;
 
             const DecodeCtxParam = switch (pl_field_kind) {
@@ -2465,7 +2465,7 @@ pub fn StdCodec(comptime V: type) type {
             const EncodeCtx = Ctxs.EncodeCtx;
             const DecodeCtx = Ctxs.DecodeCtx;
 
-            const encode_ctx_kind: FieldGroupKind = .max(
+            const encode_ctx_kind: bk.std_reflect.FieldGroupKind = .max(
                 .fromType(@FieldType(EncodeCtx, "key")),
                 .fromType(@FieldType(EncodeCtx, "val")),
             );
@@ -2474,7 +2474,7 @@ pub fn StdCodec(comptime V: type) type {
                 .all_opt_or_void => ?EncodeCtx,
                 .all_void => void,
             };
-            const decode_ctx_kind: FieldGroupKind = .max(
+            const decode_ctx_kind: bk.std_reflect.FieldGroupKind = .max(
                 .fromType(@FieldType(DecodeCtx, "key")),
                 .fromType(@FieldType(DecodeCtx, "val")),
             );
@@ -2834,11 +2834,11 @@ pub fn StdCodec(comptime V: type) type {
 
             var field_names: [fields.len][]const u8 = undefined;
 
-            var enc_field_kind_max: FieldGroupKind = .all_void;
+            var enc_field_kind_max: bk.std_reflect.FieldGroupKind = .all_void;
             var encode_field_types: [fields.len]type = undefined;
             var encode_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
 
-            var dec_field_kind_max: FieldGroupKind = .all_void;
+            var dec_field_kind_max: bk.std_reflect.FieldGroupKind = .all_void;
             var decode_field_types: [fields.len]type = undefined;
             var decode_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
 
@@ -2863,7 +2863,7 @@ pub fn StdCodec(comptime V: type) type {
 
                 name.* = field.name;
 
-                const enc_field_kind: FieldGroupKind = .fromType(std_field_codec.EncodeCtx);
+                const enc_field_kind: bk.std_reflect.FieldGroupKind = .fromType(std_field_codec.EncodeCtx);
                 enc_field_kind_max = .max(enc_field_kind_max, enc_field_kind);
                 EncodeType.* = std_field_codec.EncodeCtx;
                 encode_attr.* = .{
@@ -2871,7 +2871,7 @@ pub fn StdCodec(comptime V: type) type {
                     .default_value_ptr = if (enc_field_kind == .all_void) @ptrCast(&{}) else null,
                 };
 
-                const dec_field_kind: FieldGroupKind = .fromType(std_field_codec.DecodeCtx);
+                const dec_field_kind: bk.std_reflect.FieldGroupKind = .fromType(std_field_codec.DecodeCtx);
                 dec_field_kind_max = .max(dec_field_kind_max, dec_field_kind);
                 DecodeType.* = std_field_codec.DecodeCtx;
                 decode_attr.* = .{
@@ -2918,27 +2918,6 @@ pub fn StdCodec(comptime V: type) type {
         }
     };
 }
-
-const FieldGroupKind = enum(u2) {
-    /// All fields are void.
-    all_void = 0,
-    /// Some fields are not void, but are optional.
-    all_opt_or_void = 1,
-    /// Some fields are not void, and are also not optional.
-    some_required = 2,
-
-    fn fromType(comptime T: type) FieldGroupKind {
-        return switch (@typeInfo(T)) {
-            .void => .all_void,
-            .optional => .all_opt_or_void,
-            else => .some_required,
-        };
-    }
-
-    fn max(a: FieldGroupKind, b: FieldGroupKind) FieldGroupKind {
-        return @enumFromInt(@max(@intFromEnum(a), @intFromEnum(b)));
-    }
-};
 
 const IndexOfScalarCmp = enum { lt, lteq, gteq, gt };
 
@@ -3088,63 +3067,68 @@ test "bool" {
 }
 
 test "int" {
-    try testEncodedBytesAndRoundTrip(u32, .standard(.int), .{
+    try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
         .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = 250,
         .expected_bytes = &.{250},
     });
-    try testEncodedBytesAndRoundTrip(u32, .standard(.int), .{
+    try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
         .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = 251,
         .expected_bytes = &.{ 251, 251, 0 },
     });
-    try testEncodedBytesAndRoundTrip(u32, .standard(.int), .{
+    try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
         .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = 300,
         .expected_bytes = &.{ 251, 0x2C, 1 },
     });
-    try testEncodedBytesAndRoundTrip(u32, .standard(.int), .{
+    try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
         .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = std.math.maxInt(u16),
         .expected_bytes = &.{ 251, 0xFF, 0xFF },
     });
-    try testEncodedBytesAndRoundTrip(u32, .standard(.int), .{
+    try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
         .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = std.math.maxInt(u16) + 1,
         .expected_bytes = &.{ 252, 0, 0, 1, 0 },
     });
 
-    try testCodecRoundTrips(i16, .standard(.int), {}, null, &intTestEdgeCases(i16) ++ .{ 1, 5, 10000, 32, 8 });
-    try testCodecRoundTrips(u16, .standard(.int), {}, null, &intTestEdgeCases(u16) ++ .{ 1, 5, 10000, 32, 8 });
-    try testCodecRoundTrips(i32, .standard(.int), {}, null, &intTestEdgeCases(i32) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(u32, .standard(.int), {}, null, &intTestEdgeCases(u32) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(i64, .standard(.int), {}, null, &intTestEdgeCases(i64) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(u64, .standard(.int), {}, null, &intTestEdgeCases(u64) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(i128, .standard(.int), {}, null, &intTestEdgeCases(i128) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(u128, .standard(.int), {}, null, &intTestEdgeCases(u128) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(i256, .standard(.int), {}, null, &intTestEdgeCases(i256) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(u256, .standard(.int), {}, null, &intTestEdgeCases(u256) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(isize, .standard(.int), {}, null, &intTestEdgeCases(isize) ++ .{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(usize, .standard(.int), {}, null, &intTestEdgeCases(usize) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i16, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(i16) ++ .{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(u16, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(u16) ++ .{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(i32, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(i32) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u32, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(u32) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i64, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(i64) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u64, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(u64) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i128, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(i128) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u128, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(u128) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(i256, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(i256) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(u256, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(u256) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(isize, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(isize) ++ .{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(usize, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(usize) ++ .{ 1, 5, 1000000000, 32, 8 });
 }
 
 test "float" {
-    try testCodecRoundTrips(f32, .standard(.float), {}, {}, &.{ 1, 5, 10000, 32, 8 });
-    try testCodecRoundTrips(f32, .standard(.float), {}, {}, &.{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(f64, .standard(.float), {}, {}, &.{ 1, 5, 10000, 32, 8 });
-    try testCodecRoundTrips(f64, .standard(.float), {}, {}, &.{ 1, 5, 1000000000, 32, 8 });
-    try testCodecRoundTrips(f32, .standard(.float), {}, {}, &floatTestEdgeCases(f32));
-    try testCodecRoundTrips(f64, .standard(.float), {}, {}, &floatTestEdgeCases(f64));
+    try testCodecRoundTrips(f32, .shallow, .standard(.float), {}, {}, {}, &.{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(f32, .shallow, .standard(.float), {}, {}, {}, &.{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(f64, .shallow, .standard(.float), {}, {}, {}, &.{ 1, 5, 10000, 32, 8 });
+    try testCodecRoundTrips(f64, .shallow, .standard(.float), {}, {}, {}, &.{ 1, 5, 1000000000, 32, 8 });
+    try testCodecRoundTrips(f32, .shallow, .standard(.float), {}, {}, {}, &floatTestEdgeCases(f32));
+    try testCodecRoundTrips(f64, .shallow, .standard(.float), {}, {}, {}, &floatTestEdgeCases(f64));
 }
 
 test "utf8_codepoint" {
@@ -3152,50 +3136,55 @@ test "utf8_codepoint" {
     try std.testing.expectEqual(2, bk.Codec(u32).standard(.utf8_codepoint).encodedSize(.default, &'\u{ff}', {}));
     try std.testing.expectEqual(3, bk.Codec(u32).standard(.utf8_codepoint).encodedSize(.default, &'\u{fff}', {}));
     try std.testing.expectEqual(4, bk.Codec(u32).standard(.utf8_codepoint).encodedSize(.default, &'\u{fffff}', {}));
-    try testCodecRoundTrips(u8, .standard(.utf8_codepoint), {}, {}, &@as([128]u8, std.simd.iota(u8, 128))); // ascii
+    try testCodecRoundTrips(u8, .shallow, .standard(.utf8_codepoint), {}, {}, {}, &@as([128]u8, std.simd.iota(u8, 128))); // ascii
     inline for (.{ u1, u2, u3, u4, u5, u6, u7, u8, u16, u21, u32 }) |AsciiInt| {
         const max_val = @min(127, std.math.maxInt(AsciiInt));
         const ascii_vals: [max_val + 1]AsciiInt = std.simd.iota(AsciiInt, max_val + 1);
         try testCodecRoundTrips(
             AsciiInt,
+            .shallow,
             .standard(.utf8_codepoint),
+            {},
             {},
             {},
             &ascii_vals,
         );
     }
-    try testCodecRoundTrips(u21, .standard(.utf8_codepoint), {}, {}, &.{ 'à', 'á', 'é', 'è', 'ì', 'í', 'ò', 'ó', 'ù', 'ú' });
-    try testCodecRoundTrips(u21, .standard(.utf8_codepoint), {}, {}, &.{ '\u{2100}', '\u{3100}', '\u{FFAAA}', '\u{FFFFF}', '\u{FFFFF}' });
+    try testCodecRoundTrips(u21, .shallow, .standard(.utf8_codepoint), {}, {}, {}, &.{ 'à', 'á', 'é', 'è', 'ì', 'í', 'ò', 'ó', 'ù', 'ú' });
+    try testCodecRoundTrips(u21, .shallow, .standard(.utf8_codepoint), {}, {}, {}, &.{ '\u{2100}', '\u{3100}', '\u{FFAAA}', '\u{FFFFF}', '\u{FFFFF}' });
 }
 
 test "optional" {
-    try testCodecRoundTrips(?void, .standard(.optional(.empty)), {}, null, &.{ null, {}, null, {}, null, {} });
-    try testCodecRoundTrips(?bool, .standard(.optional(.boolean)), {}, null, &.{
+    try testCodecRoundTrips(?void, .shallow, .standard(.optional(.empty)), {}, null, {}, &.{ null, {}, null, {}, null, {} });
+    try testCodecRoundTrips(?bool, .shallow, .standard(.optional(.boolean)), {}, null, {}, &.{
         null, false, null, true, null, true,
         null, false, true, true, null, false,
     });
-    try testCodecRoundTrips(?u32, .standard(.optional(.int)), {}, null, &.{ null, 4, null, 10000, null, 100000000 });
-    try testCodecRoundTrips(?i64, .standard(.optional(.int)), {}, null, &.{ null, -7, null, 20000, null, -100000000 });
+    try testCodecRoundTrips(?u32, .shallow, .standard(.optional(.int)), {}, null, {}, &.{ null, 4, null, 10000, null, 100000000 });
+    try testCodecRoundTrips(?i64, .shallow, .standard(.optional(.int)), {}, null, {}, &.{ null, -7, null, 20000, null, -100000000 });
 
     const config: bk.Config = .cfg(.little, .varint);
-    try testEncodedBytesAndRoundTrip(?u32, .standard(.optional(.int)), .{
+    try testEncodedBytesAndRoundTrip(?u32, .shallow, .standard(.optional(.int)), .{
         .config = config,
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = 3,
         .expected_bytes = "\x01" ++ "\x03",
     });
-    try testEncodedBytesAndRoundTrip(?u32, .standard(.optional(.int)), .{
+    try testEncodedBytesAndRoundTrip(?u32, .shallow, .standard(.optional(.int)), .{
         .config = config,
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = null,
         .expected_bytes = "\x00",
     });
-    try testEncodedBytesAndRoundTrip(?u32, .standard(.optional(.int)), .{
+    try testEncodedBytesAndRoundTrip(?u32, .shallow, .standard(.optional(.int)), .{
         .config = config,
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = 251,
         .expected_bytes = "\x01" ++ "\xFB\xFB\x00",
     });
@@ -3224,12 +3213,13 @@ test "tuple" {
 
         break :blk struct_test_edge_cases;
     };
-    try testCodecRoundTrips(S, S.bk_codec, {}, null, &struct_test_edge_cases);
+    try testCodecRoundTrips(S, .shallow, S.bk_codec, {}, null, {}, &struct_test_edge_cases);
 
-    try testEncodedBytesAndRoundTrip(S, S.bk_codec, .{
+    try testEncodedBytesAndRoundTrip(S, .shallow, S.bk_codec, .{
         .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
+        .cmp_ctx = {},
         .original = .{ .a = 1, .b = 0 },
         .expected_bytes = "\x01" ++ std.mem.toBytes(@as(f64, 0)),
     });
@@ -3260,7 +3250,7 @@ test "taggedUnion" {
         }));
     };
 
-    try testCodecRoundTrips(U, U.bk_codec, {}, null, &.{
+    try testCodecRoundTrips(U, .shallow, U.bk_codec, {}, null, {}, &.{
         .void,
         .{ .char = 42 },
         .{ .int = 1111111111 },
@@ -3270,20 +3260,20 @@ test "taggedUnion" {
 }
 
 test "array value" {
-    try testCodecRoundTrips([3]u8, .standard(.array(.byte)), {}, {}, &.{ "foo".*, "bar".*, "baz".* });
+    try testCodecRoundTrips([3]u8, .shallow, .standard(.array(.byte)), {}, {}, {}, &.{ "foo".*, "bar".*, "baz".* });
 
-    try testCodecRoundTrips([2]u64, .standard(.array(.int)), {}, null, &.{ .{ 0, 0 }, .{ 0, 1 } });
+    try testCodecRoundTrips([2]u64, .shallow, .standard(.array(.int)), {}, null, {}, &.{ .{ 0, 0 }, .{ 0, 1 } });
 
-    try testCodecRoundTrips([2]u64, .standard(.array(.int)), {}, null, @ptrCast(&intTestEdgeCases(u64) ++ intTestEdgeCases(u64)));
-    try testCodecRoundTrips([2]u64, .standard(.array(.int)), {}, null, &.{
+    try testCodecRoundTrips([2]u64, .shallow, .standard(.array(.int)), {}, null, {}, @ptrCast(&intTestEdgeCases(u64) ++ intTestEdgeCases(u64)));
+    try testCodecRoundTrips([2]u64, .shallow, .standard(.array(.int)), {}, null, {}, &.{
         .{ 1, 2 },
         .{ 61, 313131 },
         @splat(111111111),
     });
 
-    try testCodecRoundTrips([2]f32, .standard(.array(.float)), {}, {}, @ptrCast(&floatTestEdgeCases(f32) ++ floatTestEdgeCases(f32)));
-    try testCodecRoundTrips([2]f64, .standard(.array(.float)), {}, {}, @ptrCast(&floatTestEdgeCases(f64) ++ floatTestEdgeCases(f64)));
-    try testCodecRoundTrips([2]f32, .standard(.array(.float)), {}, {}, &.{
+    try testCodecRoundTrips([2]f32, .shallow, .standard(.array(.float)), {}, {}, {}, @ptrCast(&floatTestEdgeCases(f32) ++ floatTestEdgeCases(f32)));
+    try testCodecRoundTrips([2]f64, .shallow, .standard(.array(.float)), {}, {}, {}, @ptrCast(&floatTestEdgeCases(f64) ++ floatTestEdgeCases(f64)));
+    try testCodecRoundTrips([2]f32, .shallow, .standard(.array(.float)), {}, {}, {}, &.{
         .{ -1.0, 2 },
         .{ 61, -313131 },
         @splat(111111111.0),
@@ -3291,17 +3281,17 @@ test "array value" {
 }
 
 test "singleItemPtr" {
-    try testCodecRoundTrips(*const u32, .standard(.singleItemPtr(.int)), {}, null, &.{
+    try testCodecRoundTrips(*const u32, .deep, .standard(.singleItemPtr(.int)), {}, null, {}, &.{
         &0, &1, &2, &10000, &std.math.maxInt(u32),
     });
 }
 
 test "slice value" {
-    try testCodecRoundTrips([]const u8, .standard(.slice(.byte)), {}, {}, &.{
+    try testCodecRoundTrips([]const u8, .forSlice(.shallow), .standard(.slice(.byte)), {}, {}, {}, &.{
         &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }, "foo",  "bar",  "baz",
         &.{ 127, std.math.maxInt(u8) },  "fizz", "buzz", "fizzbuzz",
     });
-    try testCodecRoundTrips([]const u32, .standard(.slice(.int)), {}, null, &.{
+    try testCodecRoundTrips([]const u32, .forSlice(.shallow), .standard(.slice(.int)), {}, null, {}, &.{
         &.{ 0, 1, 2 },
         &.{ 3, 4, 5, 6 },
         &.{ 7, 8, 9, 10, 11 },
@@ -3312,7 +3302,7 @@ test "slice value" {
 }
 
 test "arrayPtr" {
-    try testCodecRoundTrips(*const [3]u32, .standard(.arrayPtr(.int)), {}, null, &.{
+    try testCodecRoundTrips(*const [3]u32, .forSlice(.shallow), .standard(.arrayPtr(.int)), {}, null, {}, &.{
         &.{ 0, 1, 2 },
         &.{ 3, 4, 5 },
         &.{ 7, 8, 9 },
@@ -3321,7 +3311,7 @@ test "arrayPtr" {
         &.{ 25, 26, 27 },
     });
 
-    try testCodecRoundTrips(*const [3]u8, .standard(.arrayPtr(.byte)), {}, {}, &.{
+    try testCodecRoundTrips(*const [3]u8, .forSlice(.shallow), .standard(.arrayPtr(.byte)), {}, {}, {}, &.{
         "foo",
         "bar",
         "baz",
@@ -3341,24 +3331,26 @@ test "arrayList" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    try testCodecRoundTrips(std.ArrayList(u8), .standard(.arrayList(.byte)), {}, {}, &.{
+    try testCodecRoundTrips(std.ArrayList(u8), .forArrayList(.shallow), .standard(.arrayList(.byte)), {}, {}, {}, &.{
         .fromOwnedSlice(try arena.dupe(u8, "")),
         .fromOwnedSlice(try arena.dupe(u8, "foo")),
         .fromOwnedSlice(try arena.dupe(u8, "baz")),
     });
 
-    try testCodecRoundTrips(std.ArrayList(u32), .standard(.arrayList(.int)), {}, null, &.{
+    try testCodecRoundTrips(std.ArrayList(u32), .forArrayList(.shallow), .standard(.arrayList(.int)), {}, null, {}, &.{
         .empty,
         .fromOwnedSlice(try arena.dupe(u32, &.{ 1, 2, 3 })),
         .fromOwnedSlice(try arena.dupe(u32, &intTestEdgeCases(u32))),
     });
     try testEncodedBytesAndRoundTrip(
         std.ArrayList(u16),
+        .forArrayList(.shallow),
         .standard(.arrayList(.int)),
         .{
             .config = .cfg(.little, .varint),
             .enc_ctx = {},
             .dec_ctx = null,
+            .cmp_ctx = {},
             .original = .fromOwnedSlice(try arena.dupe(u16, &.{ 0, 1, 250, 251 })),
             .expected_bytes = &[_]u8{4} ++ .{0} ++ .{1} ++ .{250} ++ .{ 251, 251, 0 },
         },
@@ -3395,9 +3387,11 @@ test "arrayHashMap" {
     const MapU32U32 = std.AutoArrayHashMapUnmanaged(u32, u32);
     try testCodecRoundTrips(
         MapU32U32,
+        .forArrayHashMap(.shallow, .shallow),
         .standard(.arrayHashMap(.int, .int)),
         {},
         null,
+        {},
         &.{
             .empty,
             try initArrayHashMap(arena, MapU32U32, &.{ .{ 1, 2 }, .{ 3, 4 } }),
@@ -3407,15 +3401,21 @@ test "arrayHashMap" {
 
     const MapStrU16 = std.StringArrayHashMapUnmanaged(u16);
     const lev: bk.Config = comptime .cfg(.little, .varint);
-    try testEncodedBytesAndRoundTrip(MapStrU16, .standard(.arrayHashMap(.slice(.byte), .int)), .{
-        .config = lev,
-        .enc_ctx = {},
-        .dec_ctx = null,
-        .original = try initArrayHashMap(arena, MapStrU16, &.{ .{ "foo", 2 }, .{ "bar", 4 } }),
-        .expected_bytes = encIntLit(lev, 2) ++
-            (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
-            (encStrLit(lev, "bar") ++ encIntLit(lev, 4)),
-    });
+    try testEncodedBytesAndRoundTrip(
+        MapStrU16,
+        .forArrayHashMap(.deep, .shallow),
+        .standard(.arrayHashMap(.slice(.byte), .int)),
+        .{
+            .config = lev,
+            .enc_ctx = {},
+            .dec_ctx = null,
+            .cmp_ctx = {},
+            .original = try initArrayHashMap(arena, MapStrU16, &.{ .{ "foo", 2 }, .{ "bar", 4 } }),
+            .expected_bytes = encIntLit(lev, 2) ++
+                (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
+                (encStrLit(lev, "bar") ++ encIntLit(lev, 4)),
+        },
+    );
 
     var map: MapStrU16 = .empty;
     defer map.deinit(gpa);
@@ -3619,11 +3619,16 @@ fn intTestEdgeCases(comptime T: type) [23]T {
     };
 }
 
-fn TestEncodedBytesAndRoundTripParams(comptime T: type, codec: bk.Codec(T)) type {
+fn TestEncodedBytesAndRoundTripParams(
+    comptime T: type,
+    codec: bk.Codec(T),
+    comparator: testing.Comparator(T),
+) type {
     return struct {
         config: bk.Config,
         enc_ctx: codec.EncodeCtx,
         dec_ctx: codec.DecodeCtx,
+        cmp_ctx: comparator.Ctx,
         original: T,
         expected_bytes: []const u8,
     };
@@ -3633,21 +3638,9 @@ fn TestEncodedBytesAndRoundTripParams(comptime T: type, codec: bk.Codec(T)) type
 /// also test whether `expected` decodes back into the same as `value`.
 fn testEncodedBytesAndRoundTrip(
     comptime T: type,
+    compare_ctx: testing.Comparator(T),
     codec: bk.Codec(T),
-    params: TestEncodedBytesAndRoundTripParams(T, codec),
-) !void {
-    try testEncodedBytesAndRoundTripInner(T, codec, params, std_compare_ctx);
-}
-
-fn testEncodedBytesAndRoundTripInner(
-    comptime T: type,
-    codec: bk.Codec(T),
-    params: TestEncodedBytesAndRoundTripParams(T, codec),
-    /// Expects methods:
-    /// * `fn compare(expected: anytype, actual: @TypeOf(expected)) !bool`:
-    ///   Should return true if the values were compared, and otherwise false
-    ///   to fall back to default handling of comparison.
-    compare_ctx: anytype,
+    params: TestEncodedBytesAndRoundTripParams(T, codec, compare_ctx),
 ) !void {
     const actual_bytes = try codec.encodeAlloc(
         std.testing.allocator,
@@ -3660,38 +3653,23 @@ fn testEncodedBytesAndRoundTripInner(
 
     const actual_value = codec.decodeSliceExact(actual_bytes, std.testing.allocator, params.config, params.dec_ctx);
     defer if (actual_value) |*unwrapped| codec.free(std.testing.allocator, unwrapped, params.dec_ctx) else |_| {};
-    try testing.expectEqualDeepWithOverrides(params.original, actual_value, compare_ctx);
+
+    const err_compare_ctx: testing.Comparator(anyerror!T) = .forErrorUnion(compare_ctx);
+    try err_compare_ctx.withCtx(params.cmp_ctx).expectEqual(params.original, actual_value);
 }
 
 fn testCodecRoundTrips(
-    comptime V: type,
-    codec: bk.Codec(V),
-    enc_ctx: codec.EncodeCtx,
-    dec_ctx: codec.DecodeCtx,
-    values: []const V,
-) !void {
-    try testCodecRoundTripsInner(
-        V,
-        codec,
-        enc_ctx,
-        dec_ctx,
-        values,
-        std_compare_ctx,
-    );
-}
-
-fn testCodecRoundTripsInner(
     comptime T: type,
+    comparator: testing.Comparator(T),
     codec: bk.Codec(T),
     enc_ctx: codec.EncodeCtx,
     dec_ctx: codec.DecodeCtx,
+    cmp_ctx: comparator.Ctx,
     values: []const T,
-    /// Expects methods:
-    /// * `fn compare(expected: anytype, actual: @TypeOf(expected)) !bool`:
-    ///   Should return true if the values were compared, and otherwise false
-    ///   to fall back to default handling of comparison.
-    compare_ctx: anytype,
 ) !void {
+    const err_comparator: testing.Comparator(anyerror!T) = .forErrorUnion(comparator);
+    const err_comparator_wc = err_comparator.withCtx(cmp_ctx);
+
     var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(std.testing.allocator);
 
@@ -3723,7 +3701,7 @@ fn testCodecRoundTripsInner(
                 codec.free(std.testing.allocator, unwrapped, dec_ctx);
             } else |_| {};
             errdefer std.log.err("[{d}]: expected '{any}', actual: '{any}'", .{ i, expected, actual });
-            try testing.expectEqualDeepWithOverrides(expected, actual, compare_ctx);
+            try err_comparator_wc.expectEqual(expected, actual);
         }
         try std.testing.expectEqual(0, encoded_reader.bufferedLen());
 
@@ -3761,23 +3739,7 @@ fn testCodecRoundTripsInner(
                 codec.free(std.testing.allocator, unwrapped, dec_ctx);
             } else |_| {};
             errdefer std.log.err("[{d}]: expected '{any}', actual: '{any}'", .{ i, expected, actual });
-            try testing.expectEqualDeepWithOverrides(expected, actual, compare_ctx);
+            try err_comparator_wc.expectEqual(expected, actual);
         }
     }
 }
-
-const std_compare_ctx = struct {
-    pub fn compare(expected: anytype, actual: anytype) !bool {
-        const T = @TypeOf(expected, actual);
-        if (bk.std_reflect.ArrayListInfo.from(T) != null) {
-            try std.testing.expectEqualDeep(expected.items, actual.items);
-            return true;
-        }
-        if (bk.std_reflect.ArrayHashMapInfo.from(T) != null) {
-            try testing.expectEqualDeepWithOverrides(expected.keys(), actual.keys(), @This());
-            try testing.expectEqualDeepWithOverrides(expected.values(), actual.values(), @This());
-            return true;
-        }
-        return false;
-    }
-};
