@@ -813,12 +813,8 @@ pub fn StdCodec(comptime V: type) type {
             return .optionalNonStd(.standard(payload));
         }
 
-        /// Same as `optional`, but directly accepting a non-standard `payload_codec`.
+        /// Same as `optional`, but directly accepting a non-standard `payload` codec.
         /// Facilitates composition with non-standard codecs.
-        ///
-        /// Also see:
-        /// * `optional`
-        /// * `OptionalDecodeCtx`
         pub fn optionalNonStd(payload: bk.Codec(Child)) StdCodecSelf {
             const EncodeCtx = payload.EncodeCtx;
             const DecodeCtx = OptionalDecodeCtx(payload.DecodeCtx);
@@ -1706,10 +1702,17 @@ pub fn StdCodec(comptime V: type) type {
         /// Standard codec for an array.
         /// Allocation requirement defined by element codec.
         /// Decode's initial state is defined as an array of initial states conforming to `element_codec`'s expectations.
+        ///
         /// Also see `byte_array`.
         pub fn array(element: StdCodec(Element)) StdCodecSelf {
-            const EncodeCtx = element.codec.EncodeCtx;
-            const DecodeCtx = element.codec.DecodeCtx;
+            return .arrayNonStd(.standard(element));
+        }
+
+        /// Same as `array`, but directly accepting a non-standard `element` codec.
+        /// Facilitates composition with non-standard codecs.
+        pub fn arrayNonStd(element: bk.Codec(Element)) StdCodecSelf {
+            const EncodeCtx = element.EncodeCtx;
+            const DecodeCtx = element.DecodeCtx;
 
             const array_len = switch (@typeInfo(V)) {
                 .array => |info| info.len,
@@ -1732,7 +1735,7 @@ pub fn StdCodec(comptime V: type) type {
 
                     const flattened: []const Element = @ptrCast(values); // flatten `[][n]E` as `[]E`.
 
-                    const elems_counts = try element.codec.encodeManyPartialRaw(
+                    const elems_counts = try element.encodeManyPartialRaw(
                         writer,
                         config,
                         flattened[elem_index.*..],
@@ -1749,11 +1752,11 @@ pub fn StdCodec(comptime V: type) type {
                     };
                 }
 
-                pub const encode_min_size: usize = element.codec.encode_min_size;
+                pub const encode_min_size: usize = element.encode_min_size;
 
                 pub const encode_stack_size: usize =
                     1 + // current element index
-                    element.codec.encode_stack_size;
+                    element.encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -1777,7 +1780,7 @@ pub fn StdCodec(comptime V: type) type {
                         // number of arrays decoded is `decoded_count.* / array_len`.
                         decoded_count.* = @divExact(decoded_count.*, array_len);
                     }
-                    try element.codec.decodeIntoManyRaw(
+                    try element.decodeIntoManyRaw(
                         reader,
                         gpa_opt,
                         config,
@@ -1800,7 +1803,7 @@ pub fn StdCodec(comptime V: type) type {
                         // number of arrays decoded is `decoded_count.* / array_len`.
                         decoded_count.* = @divExact(decoded_count.*, array_len);
                     }
-                    try element.codec.decodeSkipManyRaw(
+                    try element.decodeSkipManyRaw(
                         reader,
                         config,
                         value_count * array_len,
@@ -1814,30 +1817,38 @@ pub fn StdCodec(comptime V: type) type {
                     values: []const V,
                     ctx: DecodeCtx,
                 ) void {
-                    element.codec.freeMany(gpa_opt, @ptrCast(values), ctx); // flatten `[]const [n]E` as `[]E`.
+                    element.freeMany(gpa_opt, @ptrCast(values), ctx); // flatten `[]const [n]E` as `[]E`.
                 }
             });
 
             return .from(.{
-                .EncodeCtx = element.codec.EncodeCtx,
+                .EncodeCtx = element.EncodeCtx,
                 .encodeFn = erased.encode,
                 .encode_min_size = erased.encode_min_size,
                 .encode_stack_size = erased.encode_stack_size,
 
-                .DecodeCtx = element.codec.DecodeCtx,
-                .decodeInitFn = if (element.codec.decodeInitFn != null) erased.decodeInit else null,
+                .DecodeCtx = element.DecodeCtx,
+                .decodeInitFn = if (element.decodeInitFn != null) erased.decodeInit else null,
                 .decodeFn = erased.decode,
                 .decodeSkipFn = erased.decodeSkip,
-                .freeFn = if (element.codec.freeFn != null) erased.free else null,
+                .freeFn = if (element.freeFn != null) erased.free else null,
             });
         }
 
         /// Standard codec for a single item pointer.
         /// Decoding allocates the result.
         /// Disallows `Child = [n]T` and `Child = @Vector(n, T)`, see `arrayPtr` instead.
+        ///
+        /// Also see `singleItemPtrNonStd`.
         pub fn singleItemPtr(child: StdCodec(Child)) StdCodecSelf {
-            const EncodeCtx = child.codec.EncodeCtx;
-            const DecodeCtx = child.codec.DecodeCtx;
+            return .singleItemPtrNonStd(.standard(child));
+        }
+
+        /// Same as `singleItemPtr`, but directly accepting a non-standard `child` codec.
+        /// Facilitates composition with non-standard codecs.
+        pub fn singleItemPtrNonStd(child: bk.Codec(Child)) StdCodecSelf {
+            const EncodeCtx = child.EncodeCtx;
+            const DecodeCtx = child.DecodeCtx;
             return .from(.implement(EncodeCtx, DecodeCtx, struct {
                 const ptr_info = @typeInfo(V).pointer;
                 comptime {
@@ -1860,7 +1871,7 @@ pub fn StdCodec(comptime V: type) type {
                     limit: std.Io.Limit,
                     ctx: EncodeCtx,
                 ) bk.EncodeToWriterError!bk.EncodedCounts {
-                    return try child.codec.encodeOnePartialRaw(
+                    return try child.encodeOnePartialRaw(
                         writer,
                         config,
                         values[0],
@@ -1870,9 +1881,9 @@ pub fn StdCodec(comptime V: type) type {
                     );
                 }
 
-                pub const encode_min_size: usize = child.codec.encode_min_size;
+                pub const encode_min_size: usize = child.encode_min_size;
 
-                pub const encode_stack_size: usize = child.codec.encode_stack_size;
+                pub const encode_stack_size: usize = child.encode_stack_size;
 
                 pub const decodeInit = null;
 
@@ -1900,7 +1911,7 @@ pub fn StdCodec(comptime V: type) type {
                             ptr_info.child,
                             aligned_bytes[0..@sizeOf(ptr_info.child)],
                         );
-                        try child.codec.decodeIntoOne(reader, gpa, config, ptr, ctx);
+                        try child.decodeIntoOne(reader, gpa, config, ptr, ctx);
                         value.* = ptr;
                     }
                 }
@@ -1912,7 +1923,7 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     ctx: DecodeCtx,
                 ) bk.DecodeSkipError!void {
-                    try child.codec.decodeSkipManyRaw(reader, config, value_count, decoded_count, ctx);
+                    try child.decodeSkipManyRaw(reader, config, value_count, decoded_count, ctx);
                 }
 
                 pub fn free(
@@ -1922,7 +1933,7 @@ pub fn StdCodec(comptime V: type) type {
                 ) void {
                     const gpa = gpa_opt.?;
                     for (ptr_list) |ptr| {
-                        child.codec.free(gpa, ptr, ctx);
+                        child.free(gpa, ptr, ctx);
                         gpa.destroy(ptr);
                     }
                 }
@@ -1931,10 +1942,19 @@ pub fn StdCodec(comptime V: type) type {
 
         /// Standard codec for a slice. Encodes the length.
         /// Requires allocation, for the slice, and possibly for the elements (based on element codec).
-        /// Also see `byte_array`.
+        ///
+        /// Also see:
+        /// * `byte_array`.
+        /// * `sliceNonStd`.
         pub fn slice(element: StdCodec(Element)) StdCodecSelf {
-            const EncodeCtx = element.codec.EncodeCtx;
-            const DecodeCtx = element.codec.DecodeCtx;
+            return .sliceNonStd(.standard(element));
+        }
+
+        /// Same as `sliceNonStd`, but directly accepting a non-standard `element` codec.
+        /// Facilitates composition with non-standard codecs.
+        pub fn sliceNonStd(element: bk.Codec(Element)) StdCodecSelf {
+            const EncodeCtx = element.EncodeCtx;
+            const DecodeCtx = element.DecodeCtx;
             const erased = Base.ImplementMethods(EncodeCtx, DecodeCtx, struct {
                 const ptr_info = @typeInfo(V).pointer;
                 comptime {
@@ -1986,13 +2006,13 @@ pub fn StdCodec(comptime V: type) type {
                     const remaining_limit = limit.subtract(byte_count).?;
 
                     if (remaining_limit.toInt()) |byte_limit| {
-                        if (byte_limit < element.codec.encode_min_size) return .{
+                        if (byte_limit < element.encode_min_size) return .{
                             .value_count = 0,
                             .byte_count = byte_count,
                         };
                     }
 
-                    const elems_counts = try element.codec.encodeManyPartialRaw(
+                    const elems_counts = try element.encodeManyPartialRaw(
                         writer,
                         config,
                         value[elem_index.*..],
@@ -2014,13 +2034,13 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub const encode_min_size: usize = @max(
                     length.codec.encode_min_size,
-                    element.codec.encode_min_size,
+                    element.encode_min_size,
                 );
 
                 pub const encode_stack_size: usize =
                     1 + // used as a boolean value which is 0 or 1 to track whether the length was written
                     1 + // current element index
-                    element.codec.encode_stack_size;
+                    element.encode_stack_size;
 
                 pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
@@ -2082,7 +2102,7 @@ pub fn StdCodec(comptime V: type) type {
                             const value_init_len = value.len;
                             if (len != value_init_len) {
                                 if (len < value_init_len) {
-                                    element.codec.freeMany(gpa, value.*[len..], ctx);
+                                    element.freeMany(gpa, value.*[len..], ctx);
                                 }
 
                                 if (gpa.resize(@constCast(value.*), len)) {
@@ -2104,19 +2124,19 @@ pub fn StdCodec(comptime V: type) type {
                                 }
 
                                 if (len > value_init_len) {
-                                    element.codec.decodeInitMany(gpa, @constCast(value.*[value_init_len..]), ctx) catch |err| {
+                                    element.decodeInitMany(gpa, @constCast(value.*[value_init_len..]), ctx) catch |err| {
                                         // free the slice and its initialized elements and set it to empty, so that
                                         // the errdefer above can safely free it along with every other slice value.
-                                        element.codec.freeMany(gpa, value.*[0..value_init_len], ctx);
+                                        element.freeMany(gpa, value.*[0..value_init_len], ctx);
                                         gpa.free(value.*);
                                         value.* = &.{};
                                         return err;
                                     };
                                 }
                             }
-                            try element.codec.decodeIntoMany(reader, gpa, config, @constCast(value.*), ctx);
+                            try element.decodeIntoMany(reader, gpa, config, @constCast(value.*), ctx);
                         } else {
-                            try element.codec.decodeSkip(reader, config, len, ctx);
+                            try element.decodeSkip(reader, config, len, ctx);
                         }
                     }
                 }
@@ -2128,7 +2148,7 @@ pub fn StdCodec(comptime V: type) type {
                 ) void {
                     const gpa = gpa_opt.?;
                     for (slice_list) |slice_value| {
-                        element.codec.freeMany(gpa_opt, slice_value, ctx);
+                        element.freeMany(gpa_opt, slice_value, ctx);
                         gpa.free(slice_value);
                     }
                 }
@@ -2151,9 +2171,18 @@ pub fn StdCodec(comptime V: type) type {
         /// Standard codec for an array pointer. Encodes the length.
         /// Also see `byte_array_ptr`.
         /// Decoding allocates the result.
+        ///
+        /// Also see `arrayPtrNonStd`.
         pub fn arrayPtr(element: StdCodec(Element)) StdCodecSelf {
-            const EncodeCtx = element.codec.EncodeCtx;
-            const DecodeCtx = element.codec.DecodeCtx;
+            return .arrayPtrNonStd(.standard(element));
+        }
+
+        /// Standard codec for an array pointer. Encodes the length.
+        /// Also see `byte_array_ptr`.
+        /// Decoding allocates the result.
+        pub fn arrayPtrNonStd(element: bk.Codec(Element)) StdCodecSelf {
+            const EncodeCtx = element.EncodeCtx;
+            const DecodeCtx = element.DecodeCtx;
             return .from(.implement(EncodeCtx, DecodeCtx, struct {
                 const ptr_info = @typeInfo(V).pointer;
                 comptime {
@@ -2174,8 +2203,8 @@ pub fn StdCodec(comptime V: type) type {
                     null,
                 );
 
-                const slice_codec: bk.Codec(AsSlice) = .standard(.slice(element));
-                const array_codec: bk.Codec(ptr_info.child) = .standard(.array(element));
+                const slice_codec: bk.Codec(AsSlice) = .standard(.sliceNonStd(element));
+                const array_codec: bk.Codec(ptr_info.child) = .standard(.arrayNonStd(element));
 
                 pub fn encode(
                     writer: *std.Io.Writer,
@@ -2291,18 +2320,28 @@ pub fn StdCodec(comptime V: type) type {
         /// documented expectations.
         /// Allocation failure while doing so may result in destruction of the original allocation,
         /// setting it to empty.
+        ///
+        /// Also see `arrayListNonStd`.
         pub fn arrayList(
             element: StdCodec(ArrayListElem orelse void),
+        ) StdCodecSelf {
+            return .arrayListNonStd(.standard(element));
+        }
+
+        /// Same as `arrayList`, but directly accepting a non-standard `element` codec.
+        /// Facilitates composition with non-standard codecs.
+        pub fn arrayListNonStd(
+            element: bk.Codec(ArrayListElem orelse void),
         ) StdCodecSelf {
             const ArrayList = std.array_list.Aligned(
                 ArrayListElem.?,
                 maybe_array_list_info.?.alignment,
             );
 
-            const slice_codec: bk.Codec(ArrayList.Slice) = .standard(.slice(element));
+            const slice_codec: bk.Codec(ArrayList.Slice) = .standard(.sliceNonStd(element));
 
-            const EncodeCtx = element.codec.EncodeCtx;
-            const DecodeCtx = element.codec.DecodeCtx;
+            const EncodeCtx = element.EncodeCtx;
+            const DecodeCtx = element.DecodeCtx;
             return .from(.implement(EncodeCtx, DecodeCtx, struct {
                 pub fn encode(
                     writer: *std.Io.Writer,
@@ -2387,19 +2426,19 @@ pub fn StdCodec(comptime V: type) type {
                             try value.ensureTotalCapacityPrecise(gpa, len);
                             if (len > value.items.len) {
                                 const additional = value.addManyAsSliceAssumeCapacity(len - value.items.len);
-                                element.codec.decodeInitMany(gpa, additional, ctx) catch |err| {
+                                element.decodeInitMany(gpa, additional, ctx) catch |err| {
                                     value.shrinkRetainingCapacity(len - additional.len);
                                     return err;
                                 };
                             } else if (len < value.items.len) {
-                                element.codec.freeMany(gpa, value.items[len..], ctx);
+                                element.freeMany(gpa, value.items[len..], ctx);
                                 value.shrinkRetainingCapacity(len);
                             }
                             std.debug.assert(value.items.len == len);
 
-                            try element.codec.decodeIntoMany(reader, gpa, config, value.items, ctx);
+                            try element.decodeIntoMany(reader, gpa, config, value.items, ctx);
                         } else {
-                            try element.codec.decodeSkip(reader, config, len, ctx);
+                            try element.decodeSkip(reader, config, len, ctx);
                         }
                     }
                 }
@@ -2411,7 +2450,7 @@ pub fn StdCodec(comptime V: type) type {
                 ) void {
                     const gpa = gpa_opt.?;
                     for (values) |*value| {
-                        element.codec.freeMany(gpa, value.items, ctx);
+                        element.freeMany(gpa, value.items, ctx);
                         var copy = value.*;
                         copy.deinit(gpa);
                     }
@@ -2424,17 +2463,17 @@ pub fn StdCodec(comptime V: type) type {
         pub const ArrayHashMapVal = if (maybe_ahm_info) |hm_info| hm_info.V else @compileError(@typeName(V) ++ " is not a hash map");
 
         pub fn ArrayHashMapCtxs(
-            std_key: StdCodec(ArrayHashMapKey),
-            std_val: StdCodec(ArrayHashMapVal),
+            key: bk.Codec(ArrayHashMapKey),
+            val: bk.Codec(ArrayHashMapVal),
         ) type {
             return struct {
                 pub const EncodeCtx = struct {
-                    key: std_key.codec.EncodeCtx,
-                    val: std_val.codec.EncodeCtx,
+                    key: key.EncodeCtx,
+                    val: val.EncodeCtx,
                 };
                 pub const DecodeCtx = struct {
-                    key: std_key.codec.DecodeCtx,
-                    val: std_val.codec.DecodeCtx,
+                    key: key.DecodeCtx,
+                    val: val.DecodeCtx,
                 };
             };
         }
@@ -2449,10 +2488,20 @@ pub fn StdCodec(comptime V: type) type {
         /// documented expectations.
         ///
         /// Also see:
-        /// * `arrayHashMapCtxs`
+        /// * `ArrayHashMapCtxs`
+        /// * `arrayHashMapNonStd`
         pub fn arrayHashMap(
             std_key: StdCodec(if (maybe_ahm_info) |hm_info| hm_info.K else void),
             std_val: StdCodec(if (maybe_ahm_info) |hm_info| hm_info.V else void),
+        ) StdCodecSelf {
+            return .arrayHashMapNonStd(.standard(std_key), .standard(std_val));
+        }
+
+        /// Same as `arrayHashMap`, but directly accepting non-standard `key` & `val` codecs.
+        /// Facilitates composition with non-standard codecs.
+        pub fn arrayHashMapNonStd(
+            key: bk.Codec(if (maybe_ahm_info) |hm_info| hm_info.K else void),
+            val: bk.Codec(if (maybe_ahm_info) |hm_info| hm_info.V else void),
         ) StdCodecSelf {
             const hm_info = comptime maybe_ahm_info orelse @compileError(@typeName(V) ++ " is not an array hash map.");
             const Map = std.ArrayHashMapUnmanaged(
@@ -2461,7 +2510,7 @@ pub fn StdCodec(comptime V: type) type {
                 hm_info.Context,
                 hm_info.store_hash,
             );
-            const Ctxs = ArrayHashMapCtxs(std_key, std_val);
+            const Ctxs = ArrayHashMapCtxs(key, val);
             const EncodeCtx = Ctxs.EncodeCtx;
             const DecodeCtx = Ctxs.DecodeCtx;
 
@@ -2486,8 +2535,8 @@ pub fn StdCodec(comptime V: type) type {
 
             const EntryTuple = struct { *const hm_info.K, *const hm_info.V };
             const entry_codec: bk.Codec(EntryTuple) = .standard(.tuple(.{
-                .singleItemPtr(std_key),
-                .singleItemPtr(std_val),
+                .singleItemPtrNonStd(key),
+                .singleItemPtrNonStd(val),
             }));
 
             return .from(.implement(EncodeCtxParam, DecodeCtxParam, struct {
@@ -2584,8 +2633,8 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub const encode_min_size: usize = @max(
                     length.codec.encode_min_size,
-                    std_key.codec.encode_min_size,
-                    std_val.codec.encode_min_size,
+                    key.encode_min_size,
+                    val.encode_min_size,
                 );
 
                 pub const encode_stack_size: usize =
@@ -2660,13 +2709,13 @@ pub fn StdCodec(comptime V: type) type {
                                 value.keys()[0..@min(len, original_count)],
                                 value.values()[0..@min(len, original_count)],
                             ) |*k, *v| {
-                                try std_key.codec.decodeIntoOne(reader, gpa, config, k, key_ctx);
-                                try std_val.codec.decodeIntoOne(reader, gpa, config, v, val_ctx);
+                                try key.decodeIntoOne(reader, gpa, config, k, key_ctx);
+                                try val.decodeIntoOne(reader, gpa, config, v, val_ctx);
                             }
 
                             if (len < original_count) {
-                                std_key.codec.freeMany(gpa, value.keys()[len..], key_ctx);
-                                std_val.codec.freeMany(gpa, value.values()[len..], val_ctx);
+                                key.freeMany(gpa, value.keys()[len..], key_ctx);
+                                val.freeMany(gpa, value.values()[len..], val_ctx);
                                 value.shrinkRetainingCapacity(len);
                             }
 
@@ -2677,11 +2726,11 @@ pub fn StdCodec(comptime V: type) type {
                             };
 
                             if (len > original_count) for (original_count..len) |_| {
-                                const k = try std_key.codec.decode(reader, gpa, config, key_ctx);
-                                errdefer std_key.codec.free(gpa, &k, key_ctx);
+                                const k = try key.decode(reader, gpa, config, key_ctx);
+                                errdefer key.free(gpa, &k, key_ctx);
 
-                                const v = try std_val.codec.decode(reader, gpa, config, val_ctx);
-                                errdefer std_val.codec.free(gpa, &v, val_ctx);
+                                const v = try val.decode(reader, gpa, config, val_ctx);
+                                errdefer val.free(gpa, &v, val_ctx);
 
                                 if (value.contains(k)) return error.DecodeFailed;
                                 value.putAssumeCapacity(k, v);
@@ -2710,22 +2759,22 @@ pub fn StdCodec(comptime V: type) type {
                     value: *const Map,
                     maybe_ctx: DecodeCtxParam,
                 ) void {
-                    if (std_key.codec.freeFn == null and std_val.codec.freeFn == null) return;
+                    if (key.freeFn == null and val.freeFn == null) return;
                     const key_ctx, const val_ctx = unwrapKeyValCtxs(.decode, maybe_ctx);
-                    std_key.codec.freeMany(gpa, value.keys(), key_ctx);
-                    std_val.codec.freeMany(gpa, value.values(), val_ctx);
+                    key.freeMany(gpa, value.keys(), key_ctx);
+                    val.freeMany(gpa, value.values(), val_ctx);
                 }
 
                 fn unwrapKeyValCtxs(
                     comptime which: enum { encode, decode },
                     maybe_ctx: anytype,
                 ) switch (which) {
-                    .encode => struct { std_key.codec.EncodeCtx, std_val.codec.EncodeCtx },
-                    .decode => struct { std_key.codec.DecodeCtx, std_val.codec.DecodeCtx },
+                    .encode => struct { key.EncodeCtx, val.EncodeCtx },
+                    .decode => struct { key.DecodeCtx, val.DecodeCtx },
                 } {
                     const KeyCtx, const ValCtx = switch (which) {
-                        .encode => .{ std_key.codec.EncodeCtx, std_val.codec.EncodeCtx },
-                        .decode => .{ std_key.codec.DecodeCtx, std_val.codec.DecodeCtx },
+                        .encode => .{ key.EncodeCtx, val.EncodeCtx },
+                        .decode => .{ key.DecodeCtx, val.DecodeCtx },
                     };
 
                     const key_ctx: KeyCtx = ctx: {
@@ -2784,34 +2833,57 @@ pub fn StdCodec(comptime V: type) type {
             else => @compileError(@typeName(V) ++ " is not an array, vector, or pointer."),
         };
 
+        const fields_soa_opt: ?struct {
+            names: [field_count][:0]const u8,
+            std_types: [field_count]type,
+
+            const field_count: usize = switch (@typeInfo(V)) {
+                inline .@"struct", .@"union", .@"enum" => |info| info.fields.len,
+                else => 0,
+            };
+        } = switch (@typeInfo(V)) {
+            inline .@"struct", .@"union" => |info| soa: {
+                var names: [info.fields.len][:0]const u8 = undefined;
+                var std_types: [info.fields.len]type = undefined;
+                @setEvalBranchQuota(info.fields.len * 1000 + 1);
+                for (
+                    info.fields,
+                    &names,
+                    &std_types,
+                ) |
+                    field_info,
+                    *field_name,
+                    *std_type,
+                | {
+                    const FieldStdCodec = StdCodec(field_info.type);
+                    field_name.* = field_info.name;
+                    std_type.* = FieldStdCodec;
+                }
+                break :soa .{
+                    .names = names,
+                    .std_types = std_types,
+                };
+            },
+            else => null,
+        };
+
         /// A struct with the same set of field names as `V` (a struct or a union), wherein each field
         /// has a type `StdCodec(@FieldType(V, field_name))`, where `field_name` is the corresponding name
         /// of the field.
         /// If `V` is a tuple, this is also a tuple.
-        pub const Fields = blk: {
-            switch (@typeInfo(V)) {
-                inline //
-                .@"struct",
-                .@"union",
-                => |info, tag| {
-                    var names: [info.fields.len][:0]const u8 = undefined;
-                    var types: [info.fields.len]type = undefined;
-                    for (info.fields, &names, &types) |v_field, *name, *T| {
-                        const FieldCodec = StdCodec(v_field.type);
-                        name.* = v_field.name;
-                        T.* = FieldCodec;
-                    }
-
-                    if (tag == .@"struct" and info.is_tuple) {
-                        break :blk @Tuple(&types);
-                    } else {
-                        break :blk @Struct(.auto, null, &names, &types, &@splat(.{}));
-                    }
-                },
-                else => {},
-            }
-            @compileError(@typeName(V) ++ " is not a struct or a union");
-        };
+        pub const Fields = if (fields_soa_opt != null) switch (@typeInfo(V)) {
+            .@"struct" => |info| if (info.is_tuple) FieldsTuple else FieldsRecord,
+            .@"union" => FieldsRecord,
+            else => unreachable,
+        } else @compileError(@typeName(V) ++ " is not a struct or a union");
+        const FieldsTuple = @Tuple(&fields_soa_opt.?.std_types);
+        const FieldsRecord = @Struct(
+            .auto,
+            null,
+            &fields_soa_opt.?.names,
+            &fields_soa_opt.?.std_types,
+            &@splat(.{}),
+        );
 
         pub fn FieldContexts(field_codecs: Fields) struct {
             type,
