@@ -1836,7 +1836,6 @@ pub fn StdCodec(comptime V: type) type {
         }
 
         /// Standard codec for a single item pointer.
-        /// Decoding allocates the result.
         /// Disallows `Child = [n]T` and `Child = @Vector(n, T)`, see `arrayPtr` instead.
         ///
         /// Also see `singleItemPtrNonStd`.
@@ -1885,22 +1884,14 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub const encode_stack_size: usize = child.encode_stack_size;
 
-                pub const decodeInit = null;
-
-                pub fn decode(
-                    reader: *std.Io.Reader,
-                    config: bk.Config,
+                pub fn decodeInit(
                     gpa_opt: ?std.mem.Allocator,
                     values: []V,
-                    decoded_count: *usize,
                     ctx: DecodeCtx,
-                ) bk.DecodeFromReaderError!void {
+                ) std.mem.Allocator.Error!void {
                     const gpa = gpa_opt.?;
-
-                    decoded_count.* = values.len;
-                    for (values, 0..) |*value, i| {
-                        errdefer decoded_count.* = i;
-
+                    for (values, 0..) |*p_ptr, i| {
+                        errdefer free(gpa, values[0..i], ctx);
                         const aligned_bytes = try gpa.alignedAlloc(
                             u8,
                             .fromByteUnits(ptr_info.alignment),
@@ -1911,8 +1902,23 @@ pub fn StdCodec(comptime V: type) type {
                             ptr_info.child,
                             aligned_bytes[0..@sizeOf(ptr_info.child)],
                         );
-                        try child.decodeIntoOne(reader, gpa, config, ptr, ctx);
-                        value.* = ptr;
+                        try child.decodeInitOne(gpa, ptr, ctx);
+                        p_ptr.* = ptr;
+                    }
+                }
+
+                pub fn decode(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    gpa_opt: ?std.mem.Allocator,
+                    values: []V,
+                    decoded_count: *usize,
+                    ctx: DecodeCtx,
+                ) bk.DecodeFromReaderError!void {
+                    decoded_count.* = values.len;
+                    for (values, 0..) |ptr, i| {
+                        errdefer decoded_count.* = i;
+                        try child.decodeIntoOne(reader, gpa_opt, config, @constCast(ptr), ctx);
                     }
                 }
 
@@ -3356,6 +3362,25 @@ test "singleItemPtr" {
     try testCodecRoundTrips(*const u32, .deep, .standard(.singleItemPtr(.int)), {}, null, {}, &.{
         &0, &1, &2, &10000, &std.math.maxInt(u32),
     });
+
+    const u64_codec: bk.Codec(*const u64) = .standard(.singleItemPtr(.int));
+
+    const value: u64 = 72_301;
+    var evr_reader_buf: [4096]u8 = undefined;
+    var evr_value_buf: [u64_codec.encode_min_size]u8 = undefined;
+    var progress_stack: [u64_codec.encode_stack_size]u64 = undefined;
+    var evr_state: u64_codec.EncodedReader() = .initOne(&&value, .{
+        .reader_buffer = &evr_reader_buf,
+        .value_buffer = &evr_value_buf,
+        .progress_stack = &progress_stack,
+        .config = .cfg(.little, .fixint),
+        .ctx = {},
+    });
+    const evr = &evr_state.interface;
+
+    var foo: u64 = 0;
+    var bar: *const u64 = &foo;
+    try u64_codec.decodeIntoOne(evr, null, .cfg(.little, .fixint), &bar, null);
 }
 
 test "slice value" {
