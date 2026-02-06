@@ -159,7 +159,7 @@ pub const zigzag = struct {
             .signed => {},
             .unsigned => @compileError("Expected signed integer, got " ++ @typeName(Signed)),
         }
-        return @Int(.unsigned, signed_info.bits);
+        return std.meta.Int(.unsigned, signed_info.bits);
     }
 
     /// If `Int` is signed, returns `signedToUnsigned(Int, int)`.
