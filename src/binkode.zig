@@ -523,8 +523,16 @@ pub fn Codec(comptime V: type) type {
             if (values.len == 0) return;
             defer std.debug.assert(decoded_count.* <= values.len);
             try self.decodeFn(reader, gpa_opt, config, values, decoded_count, ctx);
-            if (decoded_count.* != values.len) std.debug.panic("{} != {}", .{ decoded_count.*, values.len });
-            std.debug.assert(decoded_count.* == values.len);
+            if (decoded_count.* != values.len) {
+                switch (@import("builtin").mode) {
+                    .ReleaseFast, .ReleaseSmall => {},
+                    .Debug, .ReleaseSafe => std.debug.panic(
+                        "{} != {}",
+                        .{ decoded_count.*, values.len },
+                    ),
+                }
+                unreachable; // decoded_count.* != values.len
+            }
         }
 
         /// Skips `value_count` values.
