@@ -2185,12 +2185,12 @@ pub fn StdCodec(comptime V: type) type {
 
         /// Standard codec for an array pointer. Encodes the length.
         /// Also see `byte_array_ptr`.
-        /// Decoding allocates the result.
         pub fn arrayPtrNonStd(element: bk.Codec(Element)) StdCodecSelf {
             const EncodeCtx = element.EncodeCtx;
             const DecodeCtx = element.DecodeCtx;
             return .from(.implement(EncodeCtx, DecodeCtx, struct {
                 const ptr_info = @typeInfo(V).pointer;
+                const array_len = @typeInfo(ptr_info.child).array.len;
                 comptime {
                     if (ptr_info.size != .one or @typeInfo(ptr_info.child) != .array) @compileError(
                         "array ptr codec is not implemented for type " ++ @typeName(V),
@@ -2231,7 +2231,25 @@ pub fn StdCodec(comptime V: type) type {
 
                 pub const encode_stack_size: usize = slice_codec.encode_stack_size;
 
-                pub const decodeInit = null;
+                pub fn decodeInit(
+                    gpa_opt: ?std.mem.Allocator,
+                    values: []V,
+                    ctx: DecodeCtx,
+                ) std.mem.Allocator.Error!void {
+                    const gpa = gpa_opt.?;
+
+                    for (values, 0..) |*value, i| {
+                        errdefer free(gpa, values[0..i], ctx);
+                        const array_ptr = (try gpa.alignedAlloc(
+                            @typeInfo(ptr_info.child).array.child,
+                            .fromByteUnits(ptr_info.alignment),
+                            array_len,
+                        ))[0..array_len];
+                        errdefer gpa.free(array_ptr);
+                        value.* = array_ptr;
+                        try array_codec.decodeInitOne(gpa, @constCast(value.*), ctx);
+                    }
+                }
 
                 pub fn decode(
                     reader: *std.Io.Reader,
@@ -2263,8 +2281,6 @@ pub fn StdCodec(comptime V: type) type {
                     decoded_count: *usize,
                     ctx: DecodeCtx,
                 ) !void {
-                    const gpa = if (!skip) gpa_opt.?;
-
                     const value_count: usize = if (skip) values_or_count else values_or_count.len;
                     const values = if (skip) blk: {
                         var void_slice: []void = &.{};
@@ -2276,23 +2292,14 @@ pub fn StdCodec(comptime V: type) type {
                     for (values, 0..) |*value, i| {
                         errdefer decoded_count.* = i;
 
-                        const expected_len = @typeInfo(ptr_info.child).array.len;
                         const actual_len = length.codec.decode(reader, null, config, null) catch |err| switch (err) {
                             error.OutOfMemory => unreachable,
                             else => |e| return e,
                         };
-                        if (actual_len != expected_len) return error.DecodeFailed;
+                        if (actual_len != array_len) return error.DecodeFailed;
 
                         if (!skip) {
-                            const array_ptr = (try gpa.alignedAlloc(
-                                @typeInfo(ptr_info.child).array.child,
-                                .fromByteUnits(ptr_info.alignment),
-                                actual_len,
-                            ))[0..expected_len];
-                            errdefer gpa.free(array_ptr);
-
-                            try array_codec.decodeIntoOne(reader, gpa, config, array_ptr, ctx);
-                            value.* = array_ptr;
+                            try array_codec.decodeIntoOne(reader, gpa_opt, config, @constCast(value.*), ctx);
                         } else {
                             try array_codec.decodeSkip(reader, config, 1, ctx);
                         }
