@@ -1,6 +1,7 @@
 .{
     .name = .binkode,
     .version = "0.0.0",
+    .minimum_zig_version = "0.16.0-dev.2274+a8002a856",
     .fingerprint = 0x1b59d267c8839f7b,
     .paths = .{
         "build.zig.zon",
