@@ -4,7 +4,6 @@ const bk = @import("binkode.zig");
 const testing = @import("testing.zig");
 
 pub fn StdCodec(comptime V: type) type {
-    if (V == noreturn) unreachable;
     return struct {
         codec: Base,
         const StdCodecSelf = @This();
@@ -2813,14 +2812,13 @@ pub fn StdCodec(comptime V: type) type {
 
         /// The `Child` of `V`. Corresponds to `Child` in all of the following,
         /// and all permutations of their cv-qualified forms: `?C`, `*C`.
-        /// NOTE: if `Element != noreturn`, this may be one of: `[n]Element`, `@Vector(n, Element)`.
         pub const Child = switch (@typeInfo(V)) {
             .optional => |optional_info| optional_info.child,
             .pointer => |ptr_info| switch (ptr_info.size) {
                 .one => ptr_info.child,
-                else => noreturn,
+                else => @compileError(@typeName(V) ++ " does not have a child type."),
             },
-            else => noreturn,
+            else => @compileError(@typeName(V) ++ " does not have a child type."),
         };
 
         /// The `Element` of `V`. Corresponds to `E` in all of the following, and all permutations of their cv-qualified forms:
@@ -2832,18 +2830,16 @@ pub fn StdCodec(comptime V: type) type {
         /// - `*@Vector(n, E)`
         pub const Element = switch (@typeInfo(V)) {
             .array => |array_info| array_info.child,
-            .vector => |vec_info| vec_info.child,
             .pointer => |ptr_info| switch (ptr_info.size) {
                 .one => switch (@typeInfo(ptr_info.child)) {
                     .array => |array_info| array_info.child,
-                    .vector => |vec_info| vec_info.child,
                     else => @compileError(@typeName(V) ++ " is not a valid indexable pointer."),
                 },
                 .slice => ptr_info.child,
                 .many => ptr_info.child,
                 else => @compileError(@typeName(V) ++ " is not a valid indexable pointer."),
             },
-            else => @compileError(@typeName(V) ++ " is not an array, vector, or pointer."),
+            else => @compileError(@typeName(V) ++ " is not a valid indexable pointer or array."),
         };
 
         const fields_soa_opt: ?struct {
@@ -3153,44 +3149,49 @@ test "bool" {
 
 test "int" {
     try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
-        .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = 250,
-        .expected_bytes = &.{250},
+        .permutations = &.{
+            .init(.cfg(.little, .varint), &.{250}),
+        },
     });
     try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
-        .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = 251,
-        .expected_bytes = &.{ 251, 251, 0 },
+        .permutations = &.{
+            .init(.cfg(.little, .varint), &.{ 251, 251, 0 }),
+        },
     });
     try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
-        .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = 300,
-        .expected_bytes = &.{ 251, 0x2C, 1 },
+        .permutations = &.{
+            .init(.cfg(.little, .varint), &.{ 251, 0x2C, 1 }),
+        },
     });
     try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
-        .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = std.math.maxInt(u16),
-        .expected_bytes = &.{ 251, 0xFF, 0xFF },
+        .permutations = &.{
+            .init(.cfg(.little, .varint), &.{ 251, 0xFF, 0xFF }),
+        },
     });
     try testEncodedBytesAndRoundTrip(u32, .shallow, .standard(.int), .{
-        .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = std.math.maxInt(u16) + 1,
-        .expected_bytes = &.{ 252, 0, 0, 1, 0 },
+        .permutations = &.{
+            .init(.cfg(.little, .varint), &.{ 252, 0, 0, 1, 0 }),
+        },
     });
 
     try testCodecRoundTrips(i16, .shallow, .standard(.int), {}, null, {}, &intTestEdgeCases(i16) ++ .{ 1, 5, 10000, 32, 8 });
@@ -3250,28 +3251,31 @@ test "optional" {
 
     const config: bk.Config = .cfg(.little, .varint);
     try testEncodedBytesAndRoundTrip(?u32, .shallow, .standard(.optional(.int)), .{
-        .config = config,
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = 3,
-        .expected_bytes = "\x01" ++ "\x03",
+        .permutations = &.{
+            .init(config, "\x01" ++ "\x03"),
+        },
     });
     try testEncodedBytesAndRoundTrip(?u32, .shallow, .standard(.optional(.int)), .{
-        .config = config,
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = null,
-        .expected_bytes = "\x00",
+        .permutations = &.{
+            .init(config, "\x00"),
+        },
     });
     try testEncodedBytesAndRoundTrip(?u32, .shallow, .standard(.optional(.int)), .{
-        .config = config,
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = 251,
-        .expected_bytes = "\x01" ++ "\xFB\xFB\x00",
+        .permutations = &.{
+            .init(config, "\x01" ++ "\xFB\xFB\x00"),
+        },
     });
 }
 
@@ -3301,12 +3305,13 @@ test "tuple" {
     try testCodecRoundTrips(S, .shallow, S.bk_codec, {}, null, {}, &struct_test_edge_cases);
 
     try testEncodedBytesAndRoundTrip(S, .shallow, S.bk_codec, .{
-        .config = .cfg(.little, .varint),
         .enc_ctx = {},
         .dec_ctx = null,
         .cmp_ctx = {},
         .original = .{ .a = 1, .b = 0 },
-        .expected_bytes = "\x01" ++ std.mem.toBytes(@as(f64, 0)),
+        .permutations = &.{
+            .init(.cfg(.little, .varint), "\x01" ++ std.mem.toBytes(@as(f64, 0))),
+        },
     });
 }
 
@@ -3451,12 +3456,13 @@ test "arrayList" {
         .forArrayList(.shallow),
         .standard(.arrayList(.int)),
         .{
-            .config = .cfg(.little, .varint),
             .enc_ctx = {},
             .dec_ctx = null,
             .cmp_ctx = {},
             .original = .fromOwnedSlice(try arena.dupe(u16, &.{ 0, 1, 250, 251 })),
-            .expected_bytes = &[_]u8{4} ++ .{0} ++ .{1} ++ .{250} ++ .{ 251, 251, 0 },
+            .permutations = &.{
+                .init(.cfg(.little, .varint), &[_]u8{4} ++ .{0} ++ .{1} ++ .{250} ++ .{ 251, 251, 0 }),
+            },
         },
     );
 
@@ -3510,14 +3516,15 @@ test "arrayHashMap" {
         .forArrayHashMap(.deep, .shallow),
         .standard(.arrayHashMap(.slice(.byte), .int)),
         .{
-            .config = lev,
             .enc_ctx = {},
             .dec_ctx = null,
             .cmp_ctx = {},
             .original = try initArrayHashMap(arena, MapStrU16, &.{ .{ "foo", 2 }, .{ "bar", 4 } }),
-            .expected_bytes = encIntLit(lev, 2) ++
-                (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
-                (encStrLit(lev, "bar") ++ encIntLit(lev, 4)),
+            .permutations = &.{
+                .init(lev, encIntLit(lev, 2) ++
+                    (encStrLit(lev, "foo") ++ encIntLit(lev, 2)) ++
+                    (encStrLit(lev, "bar") ++ encIntLit(lev, 4))),
+            },
         },
     );
 
@@ -3729,12 +3736,20 @@ fn TestEncodedBytesAndRoundTripParams(
     comparator: testing.Comparator(T),
 ) type {
     return struct {
-        config: bk.Config,
         enc_ctx: codec.EncodeCtx,
         dec_ctx: codec.DecodeCtx,
         cmp_ctx: comparator.Ctx,
         original: T,
-        expected_bytes: []const u8,
+        permutations: []const Permutation,
+
+        const Permutation = struct {
+            config: bk.Config,
+            expected_bytes: []const u8,
+
+            fn init(config: bk.Config, expected_bytes: []const u8) Permutation {
+                return .{ .config = config, .expected_bytes = expected_bytes };
+            }
+        };
     };
 }
 
@@ -3746,20 +3761,28 @@ fn testEncodedBytesAndRoundTrip(
     codec: bk.Codec(T),
     params: TestEncodedBytesAndRoundTripParams(T, codec, compare_ctx),
 ) !void {
-    const actual_bytes = try codec.encodeAlloc(
-        std.testing.allocator,
-        params.config,
-        &params.original,
-        params.enc_ctx,
-    );
-    defer std.testing.allocator.free(actual_bytes);
-    try std.testing.expectEqualSlices(u8, params.expected_bytes, actual_bytes);
+    const gpa = std.testing.allocator;
 
-    const actual_value = codec.decodeSliceExact(actual_bytes, std.testing.allocator, params.config, params.dec_ctx);
-    defer if (actual_value) |*unwrapped| codec.free(std.testing.allocator, unwrapped, params.dec_ctx) else |_| {};
+    var encoded_buffer: std.Io.Writer.Allocating = .init(gpa);
+    defer encoded_buffer.deinit();
 
-    const err_compare_ctx: testing.Comparator(anyerror!T) = .forErrorUnion(compare_ctx);
-    try err_compare_ctx.withCtx(params.cmp_ctx).expectEqual(params.original, actual_value);
+    for (params.permutations) |permutation| {
+        defer encoded_buffer.clearRetainingCapacity();
+        try codec.encode(
+            &encoded_buffer.writer,
+            permutation.config,
+            &params.original,
+            params.enc_ctx,
+        );
+        const actual_bytes = encoded_buffer.written();
+        try std.testing.expectEqualSlices(u8, permutation.expected_bytes, actual_bytes);
+
+        const actual_value = codec.decodeSliceExact(actual_bytes, gpa, permutation.config, params.dec_ctx);
+        defer if (actual_value) |*unwrapped| codec.free(gpa, unwrapped, params.dec_ctx) else |_| {};
+
+        const err_compare_ctx: testing.Comparator(anyerror!T) = .forErrorUnion(compare_ctx);
+        try err_compare_ctx.withCtx(params.cmp_ctx).expectEqual(params.original, actual_value);
+    }
 }
 
 fn testCodecRoundTrips(
