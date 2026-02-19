@@ -1022,6 +1022,81 @@ pub fn StdCodec(comptime V: type) type {
             });
         }
 
+        const PackedBackingInt: type = switch (@typeInfo(V)) {
+            .@"union" => @Int(.unsigned, @bitSizeOf(V)),
+            .@"struct" => |s_info| switch (s_info.layout) {
+                .@"packed" => s_info.backing_integer.?,
+                else => @compileError(@typeName(V) ++ " is not a packed type."),
+            },
+            else => @compileError(@typeName(V) ++ " is not a packed type."),
+        };
+
+        pub fn packedFields(backing_int: StdCodec(PackedBackingInt)) StdCodecSelf {
+            const EncodeCtx = backing_int.codec.EncodeCtx;
+            const DecodeCtx = backing_int.codec.DecodeCtx;
+            return .from(.implement(EncodeCtx, DecodeCtx, struct {
+                pub fn encode(
+                    writer: *std.Io.Writer,
+                    config: bk.Config,
+                    values: []const V,
+                    progress_stack: ?*[encode_stack_size]u64,
+                    limit: std.Io.Limit,
+                    encode_ctx: EncodeCtx,
+                ) bk.EncodeToWriterError!bk.EncodedCounts {
+                    return backing_int.codec.encodeManyPartialRaw(
+                        writer,
+                        config,
+                        @ptrCast(values),
+                        progress_stack,
+                        limit,
+                        encode_ctx,
+                    );
+                }
+
+                pub const encode_min_size: usize = backing_int.codec.encode_min_size;
+
+                pub const encode_stack_size: usize = backing_int.codec.encode_stack_size;
+
+                pub const decodeInit = null;
+
+                pub fn decode(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    gpa_opt: ?std.mem.Allocator,
+                    values: []V,
+                    decoded_count: *usize,
+                    maybe_diag: DecodeCtx,
+                ) bk.DecodeFromReaderError!void {
+                    try backing_int.codec.decodeIntoManyRaw(
+                        reader,
+                        gpa_opt,
+                        config,
+                        @ptrCast(values),
+                        decoded_count,
+                        maybe_diag,
+                    );
+                }
+
+                pub fn decodeSkip(
+                    reader: *std.Io.Reader,
+                    config: bk.Config,
+                    value_count: usize,
+                    decoded_count: *usize,
+                    maybe_diag: DecodeCtx,
+                ) bk.DecodeSkipError!void {
+                    try backing_int.codec.decodeSkipManyRaw(
+                        reader,
+                        config,
+                        value_count,
+                        decoded_count,
+                        maybe_diag,
+                    );
+                }
+
+                pub const free = null;
+            }));
+        }
+
         pub fn TupleEncodeCtx(field_codecs: Fields) type {
             const EncodeCtx, _, _, _, _ = FieldContexts(field_codecs);
             return EncodeCtx;
@@ -3277,6 +3352,74 @@ test "optional" {
             .init(config, "\x01" ++ "\xFB\xFB\x00"),
         },
     });
+}
+
+test "packedFields" {
+    const helper = struct {
+        fn IntWrapper(comptime Int: type) type {
+            return packed struct(Int) {
+                value: Int,
+                const IntWrapperSelf = @This();
+
+                const bk_codec: bk.Codec(IntWrapperSelf) = .standard(.packedFields(.int));
+
+                fn from(bits: Int) IntWrapperSelf {
+                    return @bitCast(bits);
+                }
+
+                const edge_cases: [23]IntWrapperSelf = @bitCast(intTestEdgeCases(Int));
+
+                fn expectEncodedBytesTestRoundTrip(
+                    config: bk.Config,
+                    original: IntWrapperSelf,
+                    expected_bytes: []const u8,
+                ) !void {
+                    try testEncodedBytesAndRoundTrip(IntWrapperSelf, .shallow, bk_codec, .{
+                        .enc_ctx = {},
+                        .dec_ctx = null,
+                        .cmp_ctx = {},
+                        .original = original,
+                        .permutations = &.{.init(config, expected_bytes)},
+                    });
+                }
+            };
+        }
+    };
+
+    const U32Wrapper = helper.IntWrapper(u32);
+    try U32Wrapper.expectEncodedBytesTestRoundTrip(.cfg(.little, .varint), .from(250), &.{250});
+    try U32Wrapper.expectEncodedBytesTestRoundTrip(.cfg(.little, .varint), .from(251), &.{ 251, 251, 0 });
+    try U32Wrapper.expectEncodedBytesTestRoundTrip(.cfg(.little, .varint), .from(300), &.{ 251, 0x2C, 1 });
+    try U32Wrapper.expectEncodedBytesTestRoundTrip(.cfg(.little, .varint), .from(std.math.maxInt(u16)), &.{ 251, 0xFF, 0xFF });
+    try U32Wrapper.expectEncodedBytesTestRoundTrip(.cfg(.little, .varint), .from(std.math.maxInt(u16) + 1), &.{ 252, 0, 0, 1, 0 });
+
+    inline for (.{
+        helper.IntWrapper(i16),
+        helper.IntWrapper(u16),
+    }) |SmallWrapper| {
+        const values = SmallWrapper.edge_cases ++ [_]SmallWrapper{
+            .from(1), .from(5), .from(10000), .from(32), .from(8),
+        };
+        try testCodecRoundTrips(SmallWrapper, .shallow, SmallWrapper.bk_codec, {}, null, {}, &values);
+    }
+    inline for (.{
+        helper.IntWrapper(usize),
+        helper.IntWrapper(u32),
+        helper.IntWrapper(u64),
+        helper.IntWrapper(u128),
+        helper.IntWrapper(u256),
+
+        helper.IntWrapper(isize),
+        helper.IntWrapper(i32),
+        helper.IntWrapper(i64),
+        helper.IntWrapper(i128),
+        helper.IntWrapper(i256),
+    }) |BigWrapper| {
+        const values = BigWrapper.edge_cases ++ [_]BigWrapper{
+            .from(1), .from(5), .from(1000000000), .from(32), .from(8),
+        };
+        try testCodecRoundTrips(BigWrapper, .shallow, BigWrapper.bk_codec, {}, null, {}, &values);
+    }
 }
 
 test "tuple" {
